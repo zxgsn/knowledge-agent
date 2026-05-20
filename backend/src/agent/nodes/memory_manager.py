@@ -59,10 +59,14 @@ async def route_intent(state: AgentState, config: RunnableConfig) -> dict:
     return {"mode": mode}
 
 
-def _sync_search_archival(query: str, limit: int = 5) -> list[dict]:
-    """Search archival memory synchronously."""
-    import json
+def _sync_search_archival(query: str, limit: int = 5, alpha: float = 0.7) -> list[dict]:
+    """Hybrid search: vector similarity + BM25 keyword match.
 
+    Args:
+        query: Search query text.
+        limit: Max results.
+        alpha: Weight for vector score (1-alpha for BM25). Default 0.7.
+    """
     import psycopg
     from pgvector import Vector
     from pgvector.psycopg import register_vector
@@ -75,21 +79,25 @@ def _sync_search_archival(query: str, limit: int = 5) -> list[dict]:
     conn = psycopg.connect(get_db_url())
     register_vector(conn)
     rows = conn.execute(
-        f"""
+        """
         SELECT content, metadata,
-               1 - (embedding <=> %s::vector) AS score
+               %s * (1 - (embedding <=> %s::vector))
+                 + (1 - %s) * ts_rank(content_tsv, plainto_tsquery('simple', %s))
+               AS score
         FROM archival_memory
+        WHERE content_tsv @@ plainto_tsquery('simple', %s)
+           OR 1 - (embedding <=> %s::vector) > 0.2
         ORDER BY score DESC
-        LIMIT {int(limit)}
+        LIMIT %s
         """,
-        (query_embedding,),
+        (alpha, query_embedding, alpha, query, query, query_embedding, int(limit)),
     ).fetchall()
     conn.close()
 
     results = []
     for row in rows:
         score = float(row[2])
-        if score >= 0.3:
+        if score >= 0.01:
             meta = row[1] if isinstance(row[1], dict) else json.loads(row[1])
             results.append({"content": row[0], "metadata": meta, "score": score})
     return results

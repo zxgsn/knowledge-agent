@@ -7,9 +7,12 @@
 ## 功能特性
 
 - **三层记忆系统** — Core Memory（常驻上下文）、Archival Memory（向量长期存储）、Recall Memory（对话历史）
+- **混合检索** — Archival Memory 检索结合向量语义相似度（DashScope embedding）与 BM25 关键词匹配（PostgreSQL tsvector + GIN 索引），提升召回率
+- **Core Memory 自动压缩** — block 接近字符上限时，LLM 自动提炼压缩内容，保留关键信息
 - **深度研究** — 多轮网页搜索，自动识别知识缺口并生成补充查询
 - **文档摄入** — 支持 URL、PDF、纯文本导入，自动分块与向量化
 - **意图路由** — LLM 自动分类：闲聊 / 研究 / 回忆 / 编辑记忆 / 摄入文档
+- **闲聊检索知识库** — 闲聊模式自动搜索 Archival Memory，将相关知识注入上下文
 - **持久化知识库** — 研究发现存储于 PostgreSQL + pgvector，跨会话可检索
 - **全栈 UI** — React 前端，实时展示 Agent 工作进度
 
@@ -33,22 +36,24 @@
 └─────────────────────────────────────────────────────┘
 ```
 
-- **Core Memory** — 常驻 system prompt 的可编辑 block，agent 可自我编辑
-- **Archival Memory** — pgvector 语义存储，持久化研究发现，支持跨会话检索
+- **Core Memory** — 常驻 system prompt 的可编辑 block，agent 可自我编辑；block 接近上限时自动 LLM 压缩
+- **Archival Memory** — pgvector 语义存储，持久化研究发现，支持跨会话检索；混合检索（向量余弦相似度 70% + BM25 关键词匹配 30%）
 - **Recall Memory** — 对话历史的语义搜索（表结构已就绪，集成待完成）
 
 ### Agent 图结构
 
 ```
 START → route_intent
-  ├── "chat"        → respond → END
+  ├── "chat"        → recall_memory → respond → END
   ├── "research"    → generate_query → [web_research × N] → reflection
   │                   ├── (知识缺口) → [web_research] → reflection (循环)
   │                   └── (信息充足) → save_to_archival → respond → END
   ├── "recall"      → recall_memory → respond → END
-  ├── "memory_edit" → respond → END
+  ├── "memory_edit" → recall_memory → respond → END
   └── "ingest"      → ingest_document → save_to_archival → respond → END
 ```
+
+所有非研究路径都会先经过 `recall_memory`，确保 Agent 回答时始终有相关知识上下文。
 
 ### 文档摄入管道
 
@@ -78,6 +83,7 @@ ArchivalMemory.put_batch() 写入 pgvector
 | LLM | 任意 OpenAI 兼容接口 | 通过 `.env` 配置 |
 | Embedding | DashScope `text-embedding-v3` | 1024 维向量 |
 | 向量存储 | PostgreSQL 16 + pgvector | Docker 部署，余弦相似度检索 |
+| 全文检索 | PostgreSQL tsvector + GIN | BM25 关键词匹配，与向量混合检索 |
 | 搜索引擎 | Tavily API | 高级搜索模式 |
 | 文档处理 | pypdf + BeautifulSoup + httpx | PDF / 网页 / 文本提取 |
 | 前端 | React 19 + Vite 6 + Tailwind CSS 4 | shadcn/ui 组件库 |
@@ -176,6 +182,8 @@ knowledge-agent/
 │   ├── langgraph.json
 │   ├── examples/
 │   │   └── cli_chat.py               # CLI 入口
+│   ├── scripts/
+│   │   └── test_recall.py            # 混合检索召回率测试
 │   └── src/agent/
 │       ├── graph.py                  # 主图定义
 │       ├── state.py                  # AgentState TypedDict

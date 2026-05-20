@@ -55,8 +55,6 @@ async def main() -> None:
         "messages": [],
         "core_memory": {},
         "archival_results": [],
-        "search_results": [],
-        "sources": [],
         "research_loop_count": 0,
         "mode": "chat",
         "doc_source": "",
@@ -105,7 +103,6 @@ async def main() -> None:
             session_state["ingest_result"] = ""
             session_state["search_query"] = []
             session_state["web_research_result"] = []
-            session_state["sources"] = []
             session_state["archival_results"] = []
             session_state["is_sufficient"] = False
             session_state["knowledge_gap"] = ""
@@ -164,10 +161,8 @@ async def main() -> None:
         session_state["ingest_result"] = ""
         session_state["search_query"] = []
         session_state["web_research_result"] = []
-        session_state["sources"] = []
         session_state["sources_gathered"] = []
         session_state["archival_results"] = []
-        session_state["search_results"] = []
         session_state["is_sufficient"] = False
         session_state["knowledge_gap"] = ""
         session_state["follow_up_queries"] = []

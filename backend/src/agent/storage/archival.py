@@ -51,6 +51,30 @@ class ArchivalMemory:
             ON archival_memory USING ivfflat (embedding vector_cosine_ops)
             WITH (lists = 100)
         """)
+        # Hybrid search: tsvector column + GIN index for BM25
+        await conn.execute(
+            "ALTER TABLE archival_memory ADD COLUMN IF NOT EXISTS content_tsv tsvector"
+        )
+        await conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_archival_tsv ON archival_memory USING GIN (content_tsv)"
+        )
+        await conn.execute(
+            "UPDATE archival_memory SET content_tsv = to_tsvector('simple', content) "
+            "WHERE content_tsv IS NULL"
+        )
+        await conn.execute("""
+            CREATE OR REPLACE FUNCTION archival_memory_tsv_trigger() RETURNS trigger AS $$
+            BEGIN
+              NEW.content_tsv := to_tsvector('simple', NEW.content);
+              RETURN NEW;
+            END;
+            $$ LANGUAGE plpgsql
+        """)
+        await conn.execute("""
+            DROP TRIGGER IF EXISTS tsvectorupdate ON archival_memory;
+            CREATE TRIGGER tsvectorupdate BEFORE INSERT OR UPDATE ON archival_memory
+              FOR EACH ROW EXECUTE FUNCTION archival_memory_tsv_trigger()
+        """)
         await conn.commit()
 
         return cls(conn=conn, embeddings=embeddings)
@@ -133,23 +157,36 @@ class ArchivalMemory:
         namespace: str = "default",
         limit: int = 5,
         metadata_filter: dict | None = None,
+        alpha: float = 0.7,
     ) -> list[dict]:
-        """Semantic search over archival memory.
+        """Hybrid search: vector similarity + BM25 keyword match.
+
+        Args:
+            query: Search query.
+            namespace: Namespace to search in.
+            limit: Max results.
+            metadata_filter: Optional key/value filters on metadata.
+            alpha: Weight for vector score (1-alpha for BM25).
 
         Returns a list of {id, content, metadata, score} dicts.
         """
         query_embedding = Vector(self.embeddings.embed_query(query))
 
         sql = """
-            SELECT id, content, metadata, 1 - (embedding <=> %s::vector) AS score
+            SELECT id, content, metadata,
+                   %s * (1 - (embedding <=> %s::vector))
+                     + (1 - %s) * ts_rank(content_tsv, plainto_tsquery('simple', %s))
+                   AS score
             FROM archival_memory
             WHERE namespace = %s
+              AND (content_tsv @@ plainto_tsquery('simple', %s)
+                   OR 1 - (embedding <=> %s::vector) > 0.2)
         """
-        params: list = [query_embedding, namespace]
+        params: list = [alpha, query_embedding, alpha, query, namespace, query, query_embedding]
 
         if metadata_filter:
             for key, value in metadata_filter.items():
-                sql += f" AND metadata->>%s = %s"
+                sql += " AND metadata->>%s = %s"
                 params.extend([key, str(value)])
 
         sql += " ORDER BY score DESC LIMIT %s"

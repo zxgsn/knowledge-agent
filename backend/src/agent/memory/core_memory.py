@@ -42,6 +42,38 @@ class CoreMemory:
             )
         block.value = value
 
+    async def compress_block(self, label: str, llm) -> bool:
+        """Compress a block that's approaching its character limit.
+
+        Uses LLM to distill the content to ~60% of the limit.
+        Returns True if compression was performed.
+        """
+        block = self.get_block(label)
+        if block.read_only:
+            return False
+        usage_ratio = block.chars_current / block.limit
+        if usage_ratio < 0.8:
+            return False
+
+        target_chars = int(block.limit * 0.6)
+        prompt = (
+            f"Compress the following memory block content to under {target_chars} characters. "
+            f"Preserve ALL key facts, names, dates, and relationships. "
+            f"Remove redundancy and verbose phrasing. Output ONLY the compressed text.\n\n"
+            f"{block.value}"
+        )
+        from langchain_core.messages import HumanMessage
+        response = await llm.ainvoke([HumanMessage(content=prompt)])
+        block.value = response.content
+        return True
+
+    def get_blocks_needing_compression(self) -> list[str]:
+        """Return labels of non-read-only blocks that are >= 80% full."""
+        return [
+            b.label for b in self._blocks
+            if not b.read_only and b.chars_current / b.limit >= 0.8
+        ]
+
     def list_labels(self) -> list[str]:
         return [b.label for b in self._blocks]
 

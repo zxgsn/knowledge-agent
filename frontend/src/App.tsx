@@ -48,6 +48,11 @@ export default function App() {
           title: "Reflection",
           data: event.reflection?.knowledge_gap || "Analyzing research results",
         };
+      } else if (event.recall_memory) {
+        processedEvent = {
+          title: "Searching Knowledge Base",
+          data: "Searching archival memory for relevant context...",
+        };
       } else if (event.save_to_archival) {
         processedEvent = {
           title: "Saving to Memory",
@@ -119,8 +124,6 @@ export default function App() {
         mode: mode,
         core_memory: {},
         archival_results: [],
-        search_results: [],
-        sources: [],
         research_loop_count: 0,
       });
     },

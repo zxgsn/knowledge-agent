@@ -2,12 +2,13 @@
 
 Flow:
   START → route_intent
-    ├── "chat" → respond → END
-    ├── "research" → generate_query → web_research → reflection
+    ├── "chat"        → recall_memory → respond → END
+    ├── "research"    → generate_query → web_research → reflection
     │     ├── (gaps) → web_research → reflection (loop)
     │     └── (sufficient) → save_to_archival → respond → END
-    ├── "memory_edit" → respond → END
-    └── "ingest" → ingest_document → save_to_archival → respond → END
+    ├── "recall"      → recall_memory → respond → END
+    ├── "memory_edit" → recall_memory → respond → END
+    └── "ingest"      → ingest_document → save_to_archival → respond → END
 """
 
 from __future__ import annotations
@@ -43,11 +44,9 @@ def route_after_intent(state: AgentState) -> str:
         return "generate_query"
     elif mode == "ingest":
         return "ingest_document"
-    elif mode == "recall":
-        return "recall_memory"
     else:
-        # chat and memory_edit both go to respond
-        return "respond"
+        # chat, recall, and memory_edit all go through memory recall first
+        return "recall_memory"
 
 
 def continue_to_web_research(state: AgentState):
@@ -101,7 +100,7 @@ builder.add_node("respond", respond)
 builder.add_edge(START, "route_intent")
 builder.add_conditional_edges(
     "route_intent", route_after_intent,
-    ["generate_query", "ingest_document", "recall_memory", "respond"],
+    ["generate_query", "ingest_document", "recall_memory"],
 )
 builder.add_conditional_edges("generate_query", continue_to_web_research, ["web_research"])
 builder.add_edge("web_research", "reflection")

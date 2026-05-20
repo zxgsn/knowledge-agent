@@ -9,9 +9,12 @@ A personal knowledge agent with persistent memory, built on LangGraph. It can re
 ## Features
 
 - **Three-Tier Memory System** — Core Memory (always in context), Archival Memory (vector long-term storage), Recall Memory (conversation history)
+- **Hybrid Search** — Archival retrieval combines vector similarity (DashScope embeddings) with BM25 keyword matching (PostgreSQL tsvector + GIN index) for better recall
+- **Core Memory Auto-Compression** — Blocks approaching their character limit are automatically distilled by the LLM, preserving key facts while staying within bounds
 - **Deep Research** — Multi-loop web search with automatic gap analysis and follow-up queries
 - **Document Ingestion** — Import URLs, PDFs, or plain text; automatic chunking and vectorization
 - **Intent Routing** — LLM-classified modes: Chat, Research, Recall, Memory Edit, Ingest
+- **Chat with Knowledge Retrieval** — Chat mode automatically searches Archival Memory for relevant context before generating a response
 - **Persistent Knowledge** — Research findings are stored in PostgreSQL + pgvector and survive across sessions
 - **Full-Stack UI** — React frontend with real-time agent activity visualization
 
@@ -35,22 +38,24 @@ A personal knowledge agent with persistent memory, built on LangGraph. It can re
 └─────────────────────────────────────────────────────┘
 ```
 
-- **Core Memory** — Editable blocks injected into the system prompt every turn. The agent can self-edit them.
-- **Archival Memory** — Long-term semantic storage in PostgreSQL + pgvector. Research findings and ingested documents are stored as 1024-dim embeddings, retrievable via cosine similarity.
+- **Core Memory** — Editable blocks injected into the system prompt every turn. The agent can self-edit them. Blocks approaching their character limit (≥80%) are automatically compressed by the LLM to stay within bounds.
+- **Archival Memory** — Long-term semantic storage in PostgreSQL + pgvector. Research findings and ingested documents are stored as 1024-dim embeddings. Retrieval uses hybrid search: vector cosine similarity (70% weight) combined with BM25 keyword matching (30% weight) via PostgreSQL `tsvector` + GIN index.
 - **Recall Memory** — Conversation history with semantic search (table structure ready, integration pending).
 
 ### Agent Graph
 
 ```
 START → route_intent
-  ├── "chat"        → respond → END
+  ├── "chat"        → recall_memory → respond → END
   ├── "research"    → generate_query → [web_research × N] → reflection
   │                    ├── (gaps found) → [web_research] → reflection (loop)
   │                    └── (sufficient) → save_to_archival → respond → END
   ├── "recall"      → recall_memory → respond → END
-  ├── "memory_edit" → respond → END
+  ├── "memory_edit" → recall_memory → respond → END
   └── "ingest"      → ingest_document → save_to_archival → respond → END
 ```
+
+All non-research paths now go through `recall_memory` first, so the agent always has relevant knowledge context when responding.
 
 ### Document Ingestion Pipeline
 
@@ -77,6 +82,7 @@ ArchivalMemory.put_batch() → PostgreSQL + pgvector
 | LLM | Any OpenAI-compatible API | Configurable via `.env` |
 | Embedding | DashScope `text-embedding-v3` | 1024-dim vectors |
 | Vector Store | PostgreSQL 16 + pgvector | Docker deployment, cosine similarity |
+| Full-Text Search | PostgreSQL tsvector + GIN | BM25 keyword matching, hybrid with vector |
 | Web Search | Tavily API | Advanced search mode |
 | Document Processing | pypdf + BeautifulSoup + httpx | PDF / web / text extraction |
 | Frontend | React 19 + Vite 6 + Tailwind CSS 4 | shadcn/ui components |
@@ -175,6 +181,8 @@ knowledge-agent/
 │   ├── langgraph.json
 │   ├── examples/
 │   │   └── cli_chat.py               # CLI entry point
+│   ├── scripts/
+│   │   └── test_recall.py            # Hybrid search recall benchmark
 │   └── src/agent/
 │       ├── graph.py                  # Main LangGraph definition
 │       ├── state.py                  # AgentState TypedDict

@@ -2,49 +2,14 @@
 
 from __future__ import annotations
 
-import asyncio
-import json
-
-import psycopg
 from langchain_core.messages import AIMessage, HumanMessage
 from langchain_core.runnables import RunnableConfig
 from langchain_openai import ChatOpenAI
-from pgvector import Vector
-from pgvector.psycopg import register_vector
 
 from agent.configuration import Configuration
 from agent.memory.core_memory import CoreMemory
 from agent.prompts import ANSWER_PROMPT, SYSTEM_PROMPT, get_current_date
 from agent.state import AgentState
-from agent.storage import get_db_url, get_embeddings
-
-
-def _search_archival_sync(query: str, limit: int = 3) -> list[dict]:
-    """Search archival memory synchronously."""
-    embeddings = get_embeddings()
-    query_embedding = Vector(embeddings.embed_query(query))
-
-    conn = psycopg.connect(get_db_url())
-    register_vector(conn)
-    rows = conn.execute(
-        """
-        SELECT content, metadata,
-               1 - (embedding <=> %s::vector) AS score
-        FROM archival_memory
-        ORDER BY embedding <=> %s::vector
-        LIMIT %s
-        """,
-        (query_embedding, query_embedding, limit),
-    ).fetchall()
-    conn.close()
-
-    results = []
-    for row in rows:
-        score = float(row[2])
-        if score >= 0.4:
-            meta = row[1] if isinstance(row[1], dict) else json.loads(row[1])
-            results.append({"content": row[0], "source": meta.get("source", ""), "score": score})
-    return results
 
 
 async def respond(state: AgentState, config: RunnableConfig) -> dict:
@@ -61,7 +26,6 @@ async def respond(state: AgentState, config: RunnableConfig) -> dict:
     research_topic = _get_research_topic(state["messages"])
     summaries = "\n\n---\n\n".join(state.get("web_research_result", []))
     archival_context = _format_archival_results(state.get("archival_results", []))
-    sources = state.get("sources", [])
 
     system = SYSTEM_PROMPT.format(
         current_date=get_current_date(),
@@ -74,7 +38,7 @@ async def respond(state: AgentState, config: RunnableConfig) -> dict:
             summaries=summaries,
             archival_context=archival_context,
         )
-    elif state.get("mode") == "recall" and archival_context:
+    elif archival_context:
         user_content = (
             f"{research_topic}\n\n"
             f"[Relevant knowledge from your archival memory]\n{archival_context}"
@@ -89,13 +53,22 @@ async def respond(state: AgentState, config: RunnableConfig) -> dict:
 
     response = await llm.ainvoke(messages)
 
-    if sources:
-        source_text = "\n\n**Sources:**\n"
-        for i, s in enumerate(sources[:10], 1):
-            source_text += f"[{i}] [{s.get('title', 'Link')}]({s.get('url', '')})\n"
-        response.content += source_text
+    # Auto-compress blocks that are approaching their character limit
+    needs_compression = core_memory.get_blocks_needing_compression()
+    if needs_compression:
+        compress_llm = ChatOpenAI(
+            model=configurable.llm_model,
+            base_url=configurable.llm_base_url,
+            api_key=configurable.llm_api_key,
+            temperature=0.2,
+        )
+        for label in needs_compression:
+            await core_memory.compress_block(label, compress_llm)
 
-    return {"messages": [AIMessage(content=response.content)]}
+    result = {"messages": [AIMessage(content=response.content)]}
+    if needs_compression:
+        result["core_memory"] = core_memory.to_dict()
+    return result
 
 
 def _get_research_topic(messages: list) -> str:
