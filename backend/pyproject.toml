@@ -8,6 +8,7 @@ dependencies = [
     "langchain>=0.3.19",
     "langchain-openai",
     "langchain-community",
+    "langsmith",
     "python-dotenv>=1.0.1",
     "langgraph-sdk>=0.1.57",
     "langgraph-cli",

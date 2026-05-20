@@ -127,6 +127,11 @@ TAVILY_API_KEY=your-tavily-key
 
 # PostgreSQL
 DATABASE_URL=postgresql://knowledge_agent:knowledge_agent@localhost:5432/knowledge_agent
+
+# LangSmith (optional — for tracing & observability)
+LANGSMITH_API_KEY=your-langsmith-key
+LANGCHAIN_TRACING_V2=true
+LANGCHAIN_PROJECT=knowledge-agent
 ```
 
 ### 3. Install Backend Dependencies
@@ -169,6 +174,21 @@ Runs at `http://localhost:5173` by default.
 cd backend
 python examples/cli_chat.py
 ```
+
+### 6. LangSmith Tracing (Optional)
+
+[LangSmith](https://smith.langchain.com/) provides tracing and observability for your agent. To enable:
+
+1. Create an account at [smith.langchain.com](https://smith.langchain.com/) and get your API key
+2. Set the env vars in `.env`:
+   ```env
+   LANGSMITH_API_KEY=lsv2_pt_xxxxx
+   LANGCHAIN_TRACING_V2=true
+   LANGCHAIN_PROJECT=knowledge-agent
+   ```
+3. Restart `langgraph dev` — all LLM calls, tool invocations, and graph executions will be traced automatically
+
+View traces at `https://smith.langchain.com/` under your project. Each run shows the full execution graph with node-level timing, input/output, and token usage.
 
 ## Project Structure
 

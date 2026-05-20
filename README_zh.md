@@ -128,6 +128,11 @@ TAVILY_API_KEY=your-tavily-key
 
 # PostgreSQL
 DATABASE_URL=postgresql://knowledge_agent:knowledge_agent@localhost:5432/knowledge_agent
+
+# LangSmith（可选，用于链路追踪与可观测性）
+LANGSMITH_API_KEY=your-langsmith-key
+LANGCHAIN_TRACING_V2=true
+LANGCHAIN_PROJECT=knowledge-agent
 ```
 
 ### 3. 安装后端依赖
@@ -170,6 +175,21 @@ npm run dev
 cd backend
 python examples/cli_chat.py
 ```
+
+### 6. LangSmith 链路追踪（可选）
+
+[LangSmith](https://smith.langchain.com/) 提供 Agent 的链路追踪与可观测性。启用步骤：
+
+1. 在 [smith.langchain.com](https://smith.langchain.com/) 注册并获取 API key
+2. 在 `.env` 中设置环境变量：
+   ```env
+   LANGSMITH_API_KEY=lsv2_pt_xxxxx
+   LANGCHAIN_TRACING_V2=true
+   LANGCHAIN_PROJECT=knowledge-agent
+   ```
+3. 重启 `langgraph dev` — 所有 LLM 调用、工具调用和图执行都会自动被追踪
+
+在 `https://smith.langchain.com/` 的项目页面查看 trace。每次运行展示完整的执行图，包含各节点的耗时、输入输出和 token 用量。
 
 ## 项目结构
 
