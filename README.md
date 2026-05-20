@@ -240,6 +240,13 @@ knowledge-agent/
 | `/ingest <url_or_path>` | Ingest a document (URL or file path) |
 | `/quit` | Exit |
 
+## Roadmap
+
+- [ ] **Document Library Output** — Structured knowledge base visualization with document collections, similar to Feishu/Lark document libraries. Support organizing archived knowledge into browsable, categorized collections with metadata, tags, and search.
+- [ ] **Feishu Integration** — Direct integration with Feishu (Lark) for bidirectional sync: ingest Feishu docs into the knowledge base, and export agent findings back to Feishu documents.
+- [ ] **Cross-encoder Re-ranking** — Add a re-ranking stage (e.g. `BAAI/bge-reranker-v2-m3`) after hybrid retrieval to improve result ordering.
+- [ ] **Recall Memory Integration** — Use conversation history in recall_memory to provide long-term conversational context across sessions.
+
 ## Acknowledgments
 
 This project draws design inspiration from:

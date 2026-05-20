@@ -12,6 +12,7 @@ class AgentState(TypedDict):
     # --- I/O ---
     messages: Annotated[list, add_messages]
     mode: str  # "chat" | "research" | "memory_edit" | "ingest" | "recall"
+    need_recall: bool  # whether to query archival memory before responding
     core_memory: dict[str, str]  # {label: value} - persisted core memory blocks
 
     # --- Research subgraph ---

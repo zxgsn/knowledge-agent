@@ -122,9 +122,6 @@ export default function App() {
       thread.submit({
         messages: newMessages,
         mode: mode,
-        core_memory: {},
-        archival_results: [],
-        research_loop_count: 0,
       });
     },
     [thread]

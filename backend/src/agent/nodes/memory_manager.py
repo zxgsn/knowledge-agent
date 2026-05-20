@@ -56,7 +56,9 @@ async def route_intent(state: AgentState, config: RunnableConfig) -> dict:
     if mode not in ("chat", "research", "memory_edit", "ingest", "recall"):
         mode = "chat"
 
-    return {"mode": mode}
+    need_recall = parsed.get("need_recall", False)
+
+    return {"mode": mode, "need_recall": need_recall}
 
 
 def _sync_search_archival(query: str, limit: int = 5, alpha: float = 0.7) -> list[dict]:
@@ -143,8 +145,9 @@ async def recall_memory(state: AgentState, config: RunnableConfig) -> dict:
     # Save user message to recall memory
     try:
         await asyncio.to_thread(_sync_save_to_recall, "user", user_msg)
-    except Exception:
-        pass  # non-critical
+    except Exception as e:
+        import sys
+        print(f"[memory_manager] Failed to save to recall: {e}", file=sys.stderr)
 
     results = await asyncio.to_thread(_sync_search_archival, user_msg, 5)
 

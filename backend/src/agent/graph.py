@@ -44,9 +44,10 @@ def route_after_intent(state: AgentState) -> str:
         return "generate_query"
     elif mode == "ingest":
         return "ingest_document"
-    else:
-        # chat, recall, and memory_edit all go through memory recall first
+    elif state.get("need_recall"):
         return "recall_memory"
+    else:
+        return "respond"
 
 
 def continue_to_web_research(state: AgentState):
@@ -100,7 +101,7 @@ builder.add_node("respond", respond)
 builder.add_edge(START, "route_intent")
 builder.add_conditional_edges(
     "route_intent", route_after_intent,
-    ["generate_query", "ingest_document", "recall_memory"],
+    ["generate_query", "ingest_document", "recall_memory", "respond"],
 )
 builder.add_conditional_edges("generate_query", continue_to_web_research, ["web_research"])
 builder.add_edge("web_research", "reflection")

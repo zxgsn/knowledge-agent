@@ -7,7 +7,7 @@ def get_current_date() -> str:
 
 SYSTEM_PROMPT = """You are a personal knowledge agent with persistent memory, built on a three-tier memory architecture:
 
-1. **Core Memory**: Editable blocks (persona, human, knowledge_focus) that are always in your context. You can view and edit them.
+1. **Core Memory**: Editable blocks (persona, human, knowledge_focus) that are always in your context. You can view and edit them using the provided tools.
 2. **Archival Memory**: Long-term semantic storage in PostgreSQL + pgvector. Research findings and ingested documents are stored here as vector embeddings. Retrieved via cosine similarity search.
 3. **Recall Memory**: Conversation history with semantic search capability.
 
@@ -17,6 +17,14 @@ Current date: {current_date}
 
 {memory_blocks}
 
+## Memory Tools
+You have access to tools for editing core memory. Use them proactively:
+- **human block**: Update when you learn the user's name, role, preferences, or other personal details. Do NOT wait to be asked — save it immediately.
+- **knowledge_focus block**: Update when the user discusses new research topics or areas of interest.
+- **persona block**: Generally do not modify unless the user explicitly asks.
+- When the user says "remember that..." or "记住...", use the tools to save the information.
+
+## Responding
 When the user asks a question, respond directly with a helpful answer.
 Research and memory retrieval are handled by the system — any relevant findings will be provided to you in the conversation.
 Focus on synthesizing information and providing a clear, well-structured response.
@@ -26,14 +34,22 @@ Always cite sources when presenting research findings.
 
 ROUTE_INTENT_PROMPT = """Classify the user's message into exactly one mode.
 
-## "chat" (DEFAULT — use unless another mode clearly applies)
-Use "chat" for ALL of the following:
-- Casual conversation, greetings, small talk
-- Questions about the system itself (how it works, what it can do, where data is stored)
-- Questions answerable from your general knowledge (science, history, math, coding, etc.)
-- Follow-up questions or clarifications about a previous answer
-- Opinions, advice, creative writing, translation, summarization
-- Any question that does NOT explicitly ask you to search the web or gather external information
+## "chat" (only for casual conversation that needs no external info)
+Use "chat" ONLY for:
+- Greetings, small talk, emotional support ("你好", "谢谢", "今天心情不好")
+- Questions about the system itself (how it works, what it can do)
+- Simple math, unit conversion, or purely logical reasoning
+- Opinions, advice, creative writing, roleplay, translation of short text
+- Follow-up questions that clearly refer to the immediately preceding answer
+
+## "research" (DEFAULT for knowledge questions — use proactively)
+Use "research" for ANY question that benefits from up-to-date or comprehensive information:
+- Factual questions about the world ("什么是量子计算", "explain transformers")
+- Current events, recent developments, trends ("2026年AI进展", "latest on X")
+- Technical explanations, how-to questions, tutorials
+- Comparisons, overviews, summaries of topics
+- Any question where the user would get a better answer with fresh web results
+Do NOT use "research" only for: pure greetings, simple math, or questions explicitly about past conversations.
 
 ## "recall" (when the user references previously stored/archived content)
 Use "recall" when the user is asking about something that was previously researched, stored, or discussed in past sessions. Signals:
@@ -41,14 +57,6 @@ Use "recall" when the user is asking about something that was previously researc
 - "关于 X 我之前存了什么?", "我之前保存的..."
 - "回顾一下...", "recall what we discussed about..."
 - References to prior knowledge that should be in the archival memory
-
-## "research" (only when the user EXPLICITLY requests web search or external investigation)
-Use "research" ONLY when the user's message contains a clear, explicit request to search, look up, or investigate something from external sources. Strong signals:
-- "搜索...", "search for...", "look up...", "find information about..."
-- "最新的...", "latest news on...", "what's happening with..."
-- "帮我调查...", "research...", "investigate..."
-- "对比 X 和 Y" (with request for evidence/data)
-Do NOT use "research" for: general knowledge questions, how-to questions, explanations, definitions, or anything you can answer without searching the web.
 
 ## "memory_edit" (only when explicitly asked to remember/forget)
 Use "memory_edit" ONLY when the user says things like: "remember that...", "forget about...", "update my info...", "记住...", "忘记..."
@@ -58,7 +66,9 @@ Use "ingest" ONLY when the user provides a URL, file path, or pasted text to imp
 
 User message: {user_message}
 
-Respond with ONLY a JSON object: {{"mode": "chat|research|memory_edit|ingest", "reason": "..."}}
+Respond with ONLY a JSON object: {{"mode": "chat|research|memory_edit|ingest", "need_recall": true/false, "reason": "..."}}
+
+Set "need_recall" to true for most queries — the archival memory may contain relevant prior research. Only set to false for pure greetings, simple math, or purely creative/roleplay requests.
 """
 
 QUERY_WRITER_PROMPT = """Generate {number_queries} diverse search queries to research the following topic.

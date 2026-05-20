@@ -3,20 +3,29 @@
 from __future__ import annotations
 
 import asyncio
+import sys
 
-from langchain_core.messages import AIMessage, HumanMessage
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langchain_core.runnables import RunnableConfig
 from langchain_openai import ChatOpenAI
 
 from agent.configuration import Configuration
 from agent.memory.core_memory import CoreMemory
+from agent.memory.tools import create_memory_tools
 from agent.nodes.memory_manager import _sync_save_to_recall
 from agent.prompts import ANSWER_PROMPT, SYSTEM_PROMPT, get_current_date
 from agent.state import AgentState
 
+MAX_TOOL_ROUNDS = 5
+
 
 async def respond(state: AgentState, config: RunnableConfig) -> dict:
-    """Generate the final response to the user."""
+    """Generate the final response to the user.
+
+    Supports tool calling for core memory editing. The LLM can call
+    core_memory_replace/insert/rethink/view tools in a loop before
+    producing its final text response.
+    """
     configurable = Configuration.from_runnable_config(config)
     llm = ChatOpenAI(
         model=configurable.llm_model,
@@ -35,7 +44,6 @@ async def respond(state: AgentState, config: RunnableConfig) -> dict:
     )
 
     if state.get("mode") == "research" and summaries:
-        # Research mode: use structured ANSWER_PROMPT with the last user message as topic
         research_topic = ""
         for msg in reversed(state["messages"]):
             if isinstance(msg, HumanMessage):
@@ -51,7 +59,6 @@ async def respond(state: AgentState, config: RunnableConfig) -> dict:
             {"role": "user", "content": user_content},
         ]
     else:
-        # Chat/recall/memory_edit: pass real multi-turn conversation history
         messages_for_llm = [{"role": "system", "content": system}]
         for msg in state["messages"][-20:]:
             if isinstance(msg, HumanMessage):
@@ -64,7 +71,31 @@ async def respond(state: AgentState, config: RunnableConfig) -> dict:
                 "content": f"[Relevant knowledge from archival memory]\n{archival_context}",
             })
 
-    response = await llm.ainvoke(messages_for_llm)
+    # Bind core memory tools so the LLM can read/edit memory
+    tools = create_memory_tools(core_memory, archival_memory=None)
+    llm_with_tools = llm.bind_tools(tools)
+    tools_by_name = {t.name: t for t in tools}
+
+    # Tool-calling loop: LLM may call tools multiple times before final answer
+    response = await llm_with_tools.ainvoke(messages_for_llm)
+
+    for _ in range(MAX_TOOL_ROUNDS):
+        if not response.tool_calls:
+            break
+
+        # Execute each tool call and collect results
+        messages_for_llm.append(response)
+        for tc in response.tool_calls:
+            tool = tools_by_name.get(tc["name"])
+            if tool:
+                result = tool.invoke(tc["args"])
+            else:
+                result = f"Unknown tool: {tc['name']}"
+            messages_for_llm.append(
+                ToolMessage(content=str(result), tool_call_id=tc["id"])
+            )
+
+        response = await llm_with_tools.ainvoke(messages_for_llm)
 
     # Auto-compress blocks that are approaching their character limit
     needs_compression = core_memory.get_blocks_needing_compression()
@@ -81,12 +112,13 @@ async def respond(state: AgentState, config: RunnableConfig) -> dict:
     # Save AI response to recall memory
     try:
         await asyncio.to_thread(_sync_save_to_recall, "assistant", response.content)
-    except Exception:
-        pass  # non-critical
+    except Exception as e:
+        print(f"[responder] Failed to save to recall: {e}", file=sys.stderr)
 
-    result = {"messages": [AIMessage(content=response.content)]}
-    if needs_compression:
-        result["core_memory"] = core_memory.to_dict()
+    result = {
+        "messages": [AIMessage(content=response.content)],
+        "core_memory": core_memory.to_dict(),
+    }
     return result
 
 
