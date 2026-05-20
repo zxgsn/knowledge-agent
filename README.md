@@ -1,15 +1,10 @@
 # Knowledge Agent
 
+[中文](README_zh.md)
+
 A personal knowledge agent with persistent memory, built on LangGraph. It can research topics via web search, ingest documents into a vector knowledge base, and recall stored knowledge across sessions.
 
 > Inspired by [Letta](https://github.com/letta-ai/letta)'s three-tier memory architecture and [Gemini Fullstack LangGraph Quickstart](https://github.com/google-gemini/gemini-fullstack-langgraph-quickstart)'s agent workflow design.
-
-<details>
-<summary>中文简介</summary>
-
-基于 LangGraph 构建的个人知识库 Agent，参考了 [Letta](https://github.com/letta-ai/letta) 的三层记忆系统设计思路与 [Gemini Fullstack LangGraph Quickstart](https://github.com/google-gemini/gemini-fullstack-langgraph-quickstart) 的 Agent 工作流架构。具备持续收集、整理、检索研究资料的能力，支持跨会话持久记忆。
-
-</details>
 
 ## Features
 
@@ -19,18 +14,6 @@ A personal knowledge agent with persistent memory, built on LangGraph. It can re
 - **Intent Routing** — LLM-classified modes: Chat, Research, Recall, Memory Edit, Ingest
 - **Persistent Knowledge** — Research findings are stored in PostgreSQL + pgvector and survive across sessions
 - **Full-Stack UI** — React frontend with real-time agent activity visualization
-
-<details>
-<summary>功能特性（中文）</summary>
-
-- **三层记忆系统** — Core Memory（常驻上下文）、Archival Memory（向量长期存储）、Recall Memory（对话历史）
-- **深度研究** — 多轮网页搜索，自动识别知识缺口并生成补充查询
-- **文档摄入** — 支持 URL、PDF、纯文本导入，自动分块与向量化
-- **意图路由** — LLM 自动分类：闲聊 / 研究 / 回忆 / 编辑记忆 / 摄入文档
-- **持久化知识库** — 研究发现存储于 PostgreSQL + pgvector，跨会话可检索
-- **全栈 UI** — React 前端，实时展示 Agent 工作进度
-
-</details>
 
 ## Architecture
 
@@ -235,16 +218,6 @@ This project draws design inspiration from:
 
 - **[Letta](https://github.com/letta-ai/letta)** (formerly MemGPT) — The three-tier memory architecture (Core / Archival / Recall), Block-based memory model, and self-editing memory concept are adapted from Letta's design. The implementation is independent and simplified for LangGraph usage.
 - **[Gemini Fullstack LangGraph Quickstart](https://github.com/google-gemini/gemini-fullstack-langgraph-quickstart)** — The fullstack agent pattern (LangGraph backend + React frontend with streaming), research loop with reflection, and activity timeline UI are inspired by this Google Gemini quickstart project.
-
-<details>
-<summary>致谢（中文）</summary>
-
-本项目的设计思路参考了以下开源项目：
-
-- **[Letta](https://github.com/letta-ai/letta)**（前身 MemGPT）— 三层记忆架构（Core / Archival / Recall）、Block 记忆模型、以及 Agent 自编辑记忆的概念均参考自 Letta。本项目的实现是独立的，并针对 LangGraph 框架进行了简化。
-- **[Gemini Fullstack LangGraph Quickstart](https://github.com/google-gemini/gemini-fullstack-langgraph-quickstart)** — 全栈 Agent 模式（LangGraph 后端 + React 流式前端）、带反思的研究循环、以及活动时间线 UI 均参考自 Google Gemini 的这个快速入门项目。
-
-</details>
 
 ## License
 
