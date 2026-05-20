@@ -1,0 +1,35 @@
+[project]
+name = "knowledge-agent"
+version = "0.1.0"
+description = "Personal knowledge base agent with Letta-inspired memory system"
+requires-python = ">=3.11,<4.0"
+dependencies = [
+    "langgraph>=0.2.6",
+    "langchain>=0.3.19",
+    "langchain-openai",
+    "langchain-community",
+    "python-dotenv>=1.0.1",
+    "langgraph-sdk>=0.1.57",
+    "langgraph-cli",
+    "langgraph-api",
+    "fastapi",
+    "psycopg[binary]>=3.1",
+    "pgvector>=0.3.0",
+    "dashscope",
+    "tavily-python",
+    "pypdf>=5.0",
+    "beautifulsoup4>=4.12",
+    "httpx>=0.27",
+    "psycopg-pool>=3.3.1",
+]
+
+[project.optional-dependencies]
+dev = ["ruff>=0.6.1", "pytest>=8.3.5"]
+
+[build-system]
+requires = ["setuptools>=73.0.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
