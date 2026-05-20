@@ -103,6 +103,32 @@ def _sync_search_archival(query: str, limit: int = 5, alpha: float = 0.7) -> lis
     return results
 
 
+def _sync_save_to_recall(role: str, content: str, thread_id: str = "default") -> None:
+    """Save a message to the recall_memory table."""
+    import uuid
+
+    import psycopg
+    from pgvector import Vector
+    from pgvector.psycopg import register_vector
+
+    from agent.storage import ensure_recall_table, get_db_url, get_embeddings
+
+    ensure_recall_table()
+    embeddings = get_embeddings()
+    entry_id = str(uuid.uuid4())
+    embedding = Vector(embeddings.embed_query(content))
+
+    conn = psycopg.connect(get_db_url())
+    register_vector(conn)
+    conn.execute(
+        "INSERT INTO recall_memory (id, thread_id, role, content, embedding) "
+        "VALUES (%s, %s, %s, %s, %s) ON CONFLICT (id) DO NOTHING",
+        (entry_id, thread_id, role, content, embedding),
+    )
+    conn.commit()
+    conn.close()
+
+
 async def recall_memory(state: AgentState, config: RunnableConfig) -> dict:
     """Search archival memory for content referenced by the user."""
     user_msg = ""
@@ -113,6 +139,12 @@ async def recall_memory(state: AgentState, config: RunnableConfig) -> dict:
 
     if not user_msg:
         return {"archival_results": []}
+
+    # Save user message to recall memory
+    try:
+        await asyncio.to_thread(_sync_save_to_recall, "user", user_msg)
+    except Exception:
+        pass  # non-critical
 
     results = await asyncio.to_thread(_sync_search_archival, user_msg, 5)
 
