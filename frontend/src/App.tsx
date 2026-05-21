@@ -64,6 +64,21 @@ export default function App() {
           data: "Composing the final answer.",
         };
         hasFinalizeEventOccurredRef.current = true;
+      } else if (event.memory_operation) {
+        const op = event.memory_operation;
+        let title = "Memory Operation";
+        let data = "Processing memory...";
+        if (op.type === "recall") {
+          title = "Searching Memory";
+          data = `Found ${op.result_count} results for: ${op.query}`;
+        } else if (op.type === "save") {
+          title = "Saving to Memory";
+          data = `Stored: ${op.topic || op.content_preview}`;
+        } else if (op.type === "ingest") {
+          title = "Ingesting Document";
+          data = `${op.document}: ${op.chunks_count} chunks stored`;
+        }
+        processedEvent = { title, data };
       }
       if (processedEvent) {
         setProcessedEventsTimeline((prevEvents) => [
@@ -73,7 +88,9 @@ export default function App() {
       }
     },
     onError: (error: any) => {
-      setError(error.message);
+      const msg =
+        error?.message ?? error?.error ?? (typeof error === "string" ? error : "An error occurred");
+      setError(msg);
     },
   });
 
@@ -109,6 +126,7 @@ export default function App() {
     (submittedInputValue: string, mode: string) => {
       if (!submittedInputValue.trim()) return;
       setProcessedEventsTimeline([]);
+      setError(null);
       hasFinalizeEventOccurredRef.current = false;
 
       const newMessages: Message[] = [
@@ -129,19 +147,12 @@ export default function App() {
 
   const handleCancel = useCallback(() => {
     thread.stop();
-    window.location.reload();
   }, [thread]);
 
   return (
     <div className="flex h-screen bg-neutral-800 text-neutral-100 font-sans antialiased">
       <main className="h-full w-full max-w-4xl mx-auto">
-        {thread.messages.length === 0 ? (
-          <WelcomeScreen
-            handleSubmit={handleSubmit}
-            isLoading={thread.isLoading}
-            onCancel={handleCancel}
-          />
-        ) : error ? (
+        {error ? (
           <div className="flex flex-col items-center justify-center h-full">
             <div className="flex flex-col items-center justify-center gap-4">
               <h1 className="text-2xl text-red-400 font-bold">Error</h1>
@@ -154,6 +165,12 @@ export default function App() {
               </Button>
             </div>
           </div>
+        ) : thread.messages.length === 0 ? (
+          <WelcomeScreen
+            handleSubmit={handleSubmit}
+            isLoading={thread.isLoading}
+            onCancel={handleCancel}
+          />
         ) : (
           <ChatMessagesView
             messages={thread.messages}

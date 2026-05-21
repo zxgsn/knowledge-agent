@@ -40,14 +40,18 @@ load_dotenv()
 def route_after_intent(state: AgentState) -> str:
     """Route to the appropriate sub-graph based on intent."""
     mode = state.get("mode", "chat")
+    if mode == "ingest":
+        return "ingest_document"
+    # All other modes go through recall_memory first
+    return "recall_memory"
+
+
+def route_after_recall(state: AgentState) -> str:
+    """Route after recall_memory based on mode."""
+    mode = state.get("mode", "chat")
     if mode == "research":
         return "generate_query"
-    elif mode == "ingest":
-        return "ingest_document"
-    elif state.get("need_recall"):
-        return "recall_memory"
-    else:
-        return "respond"
+    return "respond"
 
 
 def continue_to_web_research(state: AgentState):
@@ -101,7 +105,11 @@ builder.add_node("respond", respond)
 builder.add_edge(START, "route_intent")
 builder.add_conditional_edges(
     "route_intent", route_after_intent,
-    ["generate_query", "ingest_document", "recall_memory", "respond"],
+    ["ingest_document", "recall_memory"],
+)
+builder.add_conditional_edges(
+    "recall_memory", route_after_recall,
+    ["generate_query", "respond"],
 )
 builder.add_conditional_edges("generate_query", continue_to_web_research, ["web_research"])
 builder.add_edge("web_research", "reflection")
@@ -110,7 +118,6 @@ builder.add_conditional_edges(
 )
 builder.add_edge("ingest_document", "save_to_archival")
 builder.add_edge("save_to_archival", "respond")
-builder.add_edge("recall_memory", "respond")
 builder.add_edge("respond", END)
 
 graph = builder.compile(name="knowledge-agent")

@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import sys
 
+import httpx
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langchain_core.runnables import RunnableConfig
 from langchain_openai import ChatOpenAI
@@ -32,6 +33,8 @@ async def respond(state: AgentState, config: RunnableConfig) -> dict:
         base_url=configurable.llm_base_url,
         api_key=configurable.llm_api_key,
         temperature=0.5,
+        http_async_client=httpx.AsyncClient(proxy=None),
+        extra_body={"thinking": {"type": "enabled"}},
     )
 
     core_memory = CoreMemory.from_dict(state.get("core_memory", {}))
@@ -83,7 +86,8 @@ async def respond(state: AgentState, config: RunnableConfig) -> dict:
         if not response.tool_calls:
             break
 
-        # Execute each tool call and collect results
+        # Execute each tool call and collect results.
+        # Append the full assistant message (with reasoning_content) directly.
         messages_for_llm.append(response)
         for tc in response.tool_calls:
             tool = tools_by_name.get(tc["name"])
@@ -91,9 +95,11 @@ async def respond(state: AgentState, config: RunnableConfig) -> dict:
                 result = tool.invoke(tc["args"])
             else:
                 result = f"Unknown tool: {tc['name']}"
-            messages_for_llm.append(
-                ToolMessage(content=str(result), tool_call_id=tc["id"])
-            )
+            messages_for_llm.append({
+                "role": "tool",
+                "content": str(result),
+                "tool_call_id": tc["id"],
+            })
 
         response = await llm_with_tools.ainvoke(messages_for_llm)
 
@@ -105,6 +111,8 @@ async def respond(state: AgentState, config: RunnableConfig) -> dict:
             base_url=configurable.llm_base_url,
             api_key=configurable.llm_api_key,
             temperature=0.2,
+            http_async_client=httpx.AsyncClient(proxy=None),
+            extra_body={"thinking": {"type": "enabled"}},
         )
         for label in needs_compression:
             await core_memory.compress_block(label, compress_llm)

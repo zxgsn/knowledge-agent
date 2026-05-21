@@ -8,6 +8,7 @@ import re
 
 import httpx
 from langchain_core.messages import AIMessage, HumanMessage
+from langchain_openai import ChatOpenAI
 from langchain_core.runnables import RunnableConfig
 from langchain_openai import ChatOpenAI
 
@@ -37,6 +38,8 @@ def _get_llm(config: Configuration, temperature: float = 0.7) -> ChatOpenAI:
         base_url=config.llm_base_url,
         api_key=config.llm_api_key,
         temperature=temperature,
+        http_async_client=httpx.AsyncClient(proxy=None),
+        extra_body={"thinking": {"type": "enabled"}},
     )
 
 

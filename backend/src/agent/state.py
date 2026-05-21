@@ -30,3 +30,6 @@ class AgentState(TypedDict):
     doc_source: str
     doc_source_type: str
     ingest_result: str
+
+    # --- Memory Operations Log ---
+    memory_operations: Annotated[list, operator.add]  # 记忆操作日志

@@ -6,6 +6,8 @@ import asyncio
 import json
 import re
 
+import httpx
+
 from langchain_core.messages import HumanMessage
 from langchain_core.runnables import RunnableConfig
 from langchain_openai import ChatOpenAI
@@ -38,6 +40,8 @@ async def route_intent(state: AgentState, config: RunnableConfig) -> dict:
         base_url=configurable.llm_base_url,
         api_key=configurable.llm_api_key,
         temperature=0,
+        http_async_client=httpx.AsyncClient(proxy=None),
+        extra_body={"thinking": {"type": "enabled"}},
     )
 
     user_msg = ""
@@ -75,10 +79,21 @@ def _sync_search_archival(query: str, limit: int = 5, alpha: float = 0.7) -> lis
 
     from agent.storage import get_db_url, get_embeddings
 
-    embeddings = get_embeddings()
-    query_embedding = Vector(embeddings.embed_query(query))
+    try:
+        embeddings = get_embeddings()
+        query_embedding = Vector(embeddings.embed_query(query))
+    except Exception as e:
+        import sys
+        print(f"[memory_manager] Embedding failed: {e}", file=sys.stderr)
+        return []
 
-    conn = psycopg.connect(get_db_url())
+    try:
+        conn = psycopg.connect(get_db_url(), connect_timeout=5)
+    except Exception as e:
+        import sys
+        print(f"[memory_manager] DB connection failed: {e}", file=sys.stderr)
+        return []
+
     register_vector(conn)
     rows = conn.execute(
         """
@@ -120,7 +135,7 @@ def _sync_save_to_recall(role: str, content: str, thread_id: str = "default") ->
     entry_id = str(uuid.uuid4())
     embedding = Vector(embeddings.embed_query(content))
 
-    conn = psycopg.connect(get_db_url())
+    conn = psycopg.connect(get_db_url(), connect_timeout=5)
     register_vector(conn)
     conn.execute(
         "INSERT INTO recall_memory (id, thread_id, role, content, embedding) "
@@ -133,6 +148,8 @@ def _sync_save_to_recall(role: str, content: str, thread_id: str = "default") ->
 
 async def recall_memory(state: AgentState, config: RunnableConfig) -> dict:
     """Search archival memory for content referenced by the user."""
+    from datetime import datetime, timezone
+
     user_msg = ""
     for msg in reversed(state["messages"]):
         if isinstance(msg, HumanMessage):
@@ -151,6 +168,14 @@ async def recall_memory(state: AgentState, config: RunnableConfig) -> dict:
 
     results = await asyncio.to_thread(_sync_search_archival, user_msg, 5)
 
+    # Log memory operation
+    memory_ops = [{
+        "type": "recall",
+        "query": user_msg[:100] + "..." if len(user_msg) > 100 else user_msg,
+        "result_count": len(results),
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    }]
+
     return {
         "archival_results": [
             {
@@ -159,7 +184,8 @@ async def recall_memory(state: AgentState, config: RunnableConfig) -> dict:
                 "score": r["score"],
             }
             for r in results
-        ]
+        ],
+        "memory_operations": memory_ops,
     }
 
 
@@ -179,7 +205,7 @@ def _sync_put_to_archival(content: str, namespace: str, metadata: dict) -> str:
     metadata["timestamp"] = datetime.now(timezone.utc).isoformat()
     embedding = Vector(embeddings.embed_query(content))
 
-    conn = psycopg.connect(get_db_url())
+    conn = psycopg.connect(get_db_url(), connect_timeout=5)
     register_vector(conn)
     conn.execute(
         "INSERT INTO archival_memory (id, namespace, content, metadata, embedding) "
@@ -211,7 +237,7 @@ def _sync_put_batch_to_archival(entries: list[dict], namespace: str) -> list[str
     now = datetime.now(timezone.utc).isoformat()
     ids: list[str] = []
 
-    conn = psycopg.connect(get_db_url())
+    conn = psycopg.connect(get_db_url(), connect_timeout=5)
     register_vector(conn)
     for entry, emb in zip(entries, embedding_vectors):
         entry_id = str(uuid.uuid4())
@@ -231,12 +257,16 @@ def _sync_put_batch_to_archival(entries: list[dict], namespace: str) -> list[str
 
 async def save_to_archival(state: AgentState, config: RunnableConfig) -> dict:
     """Extract key findings and save them to archival memory (PostgreSQL)."""
+    from datetime import datetime, timezone
+
     configurable = Configuration.from_runnable_config(config)
     llm = ChatOpenAI(
         model=configurable.llm_model,
         base_url=configurable.llm_base_url,
         api_key=configurable.llm_api_key,
         temperature=0.3,
+        http_async_client=httpx.AsyncClient(proxy=None),
+        extra_body={"thinking": {"type": "enabled"}},
     )
 
     research_topic = _get_research_topic(state["messages"])
@@ -268,13 +298,24 @@ async def save_to_archival(state: AgentState, config: RunnableConfig) -> dict:
             }]
         }
 
+    # Log memory operation
+    memory_ops = [{
+        "type": "save",
+        "content_preview": response.content[:100] + "..." if len(response.content) > 100 else response.content,
+        "source": "research_summary",
+        "topic": research_topic,
+        "entry_id": entry_id,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    }]
+
     return {
         "archival_results": [{
             "id": entry_id,
             "content": response.content,
             "source": "research_summary",
             "topic": research_topic,
-        }]
+        }],
+        "memory_operations": memory_ops,
     }
 
 
@@ -291,6 +332,8 @@ async def ingest_document_node(state: AgentState, config: RunnableConfig) -> dic
 
     Extracts text -> chunks -> embeds -> stores in archival memory.
     """
+    from datetime import datetime, timezone
+
     from agent.storage.ingestion import ingest_text, ingest_url
 
     doc_source = state.get("doc_source", "")
@@ -341,6 +384,17 @@ async def ingest_document_node(state: AgentState, config: RunnableConfig) -> dic
             f"{len(entry_ids)} stored in archival memory. "
             f"Source: {doc_source if source_type == 'url' else 'plain text'}."
         )
+
+        # Log memory operation
+        memory_ops = [{
+            "type": "ingest",
+            "document": doc_label,
+            "chunks_count": len(chunks),
+            "stored_count": len(entry_ids),
+            "source_type": source_type,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        }]
+
         return {
             "ingest_result": result,
             "archival_results": [
@@ -354,6 +408,7 @@ async def ingest_document_node(state: AgentState, config: RunnableConfig) -> dic
                 }
                 for eid, c in zip(entry_ids, chunks)
             ],
+            "memory_operations": memory_ops,
         }
     except Exception as e:
         return {"ingest_result": f"Error ingesting document: {e}"}
