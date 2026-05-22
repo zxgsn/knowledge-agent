@@ -34,6 +34,14 @@ class Configuration(BaseModel):
         default=2,
         metadata={"description": "Maximum number of research loops."},
     )
+    memory_consolidation_interval: int = Field(
+        default=10,
+        metadata={"description": "Run memory consolidation every N turns."},
+    )
+    memory_dedup_threshold: float = Field(
+        default=0.8,
+        metadata={"description": "Cosine similarity threshold for fact deduplication."},
+    )
 
     @classmethod
     def from_runnable_config(

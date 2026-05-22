@@ -31,5 +31,9 @@ class AgentState(TypedDict):
     doc_source_type: str
     ingest_result: str
 
+    # --- Memory Pipeline ---
+    turn_count: int
+    pipeline_facts: list[dict]
+
     # --- Memory Operations Log ---
     memory_operations: Annotated[list, operator.add]  # 记忆操作日志

@@ -2,13 +2,13 @@
 
 Flow:
   START → route_intent
-    ├── "chat"        → recall_memory → respond → END
+    ├── "chat"        → recall_memory → respond → memory_pipeline → [consolidate?] → END
     ├── "research"    → generate_query → web_research → reflection
     │     ├── (gaps) → web_research → reflection (loop)
-    │     └── (sufficient) → save_to_archival → respond → END
-    ├── "recall"      → recall_memory → respond → END
-    ├── "memory_edit" → recall_memory → respond → END
-    └── "ingest"      → ingest_document → save_to_archival → respond → END
+    │     └── (sufficient) → save_to_archival → respond → memory_pipeline → [consolidate?] → END
+    ├── "recall"      → recall_memory → respond → memory_pipeline → [consolidate?] → END
+    ├── "memory_edit" → recall_memory → respond → memory_pipeline → [consolidate?] → END
+    └── "ingest"      → ingest_document → save_to_archival → respond → memory_pipeline → [consolidate?] → END
 """
 
 from __future__ import annotations
@@ -28,6 +28,7 @@ from agent.nodes.memory_manager import (
     route_intent,
     save_to_archival,
 )
+from agent.nodes.memory_pipeline import consolidate_memory, memory_pipeline
 from agent.nodes.researcher import generate_query, reflection, web_research
 from agent.nodes.responder import respond
 from agent.state import AgentState
@@ -87,6 +88,15 @@ def evaluate_research(state: AgentState, config: RunnableConfig):
     ]
 
 
+def route_after_pipeline(state: AgentState, config: RunnableConfig) -> str:
+    """Decide whether to run consolidation after memory pipeline."""
+    configurable = Configuration.from_runnable_config(config)
+    turn_count = state.get("turn_count", 0)
+    if turn_count > 0 and turn_count % configurable.memory_consolidation_interval == 0:
+        return "consolidate_memory"
+    return END
+
+
 # --- Build the graph ---
 
 builder = StateGraph(AgentState, config_schema=Configuration)
@@ -100,6 +110,8 @@ builder.add_node("ingest_document", ingest_document_node)
 builder.add_node("save_to_archival", save_to_archival)
 builder.add_node("recall_memory", recall_memory)
 builder.add_node("respond", respond)
+builder.add_node("memory_pipeline", memory_pipeline)
+builder.add_node("consolidate_memory", consolidate_memory)
 
 # Wire edges
 builder.add_edge(START, "route_intent")
@@ -118,6 +130,11 @@ builder.add_conditional_edges(
 )
 builder.add_edge("ingest_document", "save_to_archival")
 builder.add_edge("save_to_archival", "respond")
-builder.add_edge("respond", END)
+builder.add_edge("respond", "memory_pipeline")
+builder.add_conditional_edges(
+    "memory_pipeline", route_after_pipeline,
+    ["consolidate_memory", END],
+)
+builder.add_edge("consolidate_memory", END)
 
 graph = builder.compile(name="knowledge-agent")

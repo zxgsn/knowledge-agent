@@ -1,0 +1,317 @@
+[
+  {
+    "sample_id": "0",
+    "conversation": [
+      {
+        "session_id": 1,
+        "dialogue": [
+          {"speaker": "Alice", "utterance": "Hi! I just moved to Beijing last month. I'm working at ByteDance now as a software engineer."},
+          {"speaker": "Bob", "utterance": "That's great! I've been in Shanghai for three years. I work at Alibaba Cloud."},
+          {"speaker": "Alice", "utterance": "I graduated from Tsinghua University in 2023, majoring in Computer Science."},
+          {"speaker": "Bob", "utterance": "Nice! I went to Fudan University. My major was Data Science."},
+          {"speaker": "Alice", "utterance": "My favorite programming language is Rust. I've been using it for about two years now."},
+          {"speaker": "Bob", "utterance": "I prefer Python personally. It's what we use most at Alibaba for ML pipelines."}
+        ]
+      },
+      {
+        "session_id": 2,
+        "dialogue": [
+          {"speaker": "Alice", "utterance": "I adopted a cat last weekend! Her name is Mimi, she's a British Shorthair."},
+          {"speaker": "Bob", "utterance": "Cute! I have a golden retriever named DouDou. He's 4 years old."},
+          {"speaker": "Alice", "utterance": "I live near Zhongguancun now. The rent is about 6000 yuan per month for a one-bedroom apartment."},
+          {"speaker": "Bob", "utterance": "That's reasonable. I pay 8000 in Pudong for a similar place."},
+          {"speaker": "Alice", "utterance": "I'm planning to take the AWS Solutions Architect exam next month."},
+          {"speaker": "Bob", "utterance": "Good luck! I passed it last year. The hardest part was the networking section."}
+        ]
+      },
+      {
+        "session_id": 3,
+        "dialogue": [
+          {"speaker": "Alice", "utterance": "I've been learning Japanese for six months. I can pass N4 now."},
+          {"speaker": "Bob", "utterance": "Impressive! I studied Korean for a year but I'm still at beginner level."},
+          {"speaker": "Alice", "utterance": "My team at ByteDance is building a recommendation system using graph neural networks."},
+          {"speaker": "Bob", "utterance": "We're working on a similar project at Alibaba. We use GNN for fraud detection."},
+          {"speaker": "Alice", "utterance": "I prefer dark mode for everything. My VS Code theme is One Dark Pro."},
+          {"speaker": "Bob", "utterance": "Same! I can't stand light mode. My eyes get tired after an hour."}
+        ]
+      }
+    ],
+    "questions": [
+      {
+        "question": "Where does Alice work?",
+        "answer": "ByteDance",
+        "question_type": "single_session"
+      },
+      {
+        "question": "What university did Alice graduate from?",
+        "answer": "Tsinghua University",
+        "question_type": "single_session"
+      },
+      {
+        "question": "What is the name of Alice's cat?",
+        "answer": "Mimi",
+        "question_type": "single_session"
+      },
+      {
+        "question": "What programming language does Alice prefer?",
+        "answer": "Rust",
+        "question_type": "single_session"
+      },
+      {
+        "question": "What is Alice's team building at ByteDance?",
+        "answer": "recommendation system using graph neural networks",
+        "question_type": "multi_session"
+      },
+      {
+        "question": "What exam is Alice planning to take?",
+        "answer": "AWS Solutions Architect",
+        "question_type": "single_session"
+      },
+      {
+        "question": "How much does Alice pay for rent?",
+        "answer": "6000 yuan per month",
+        "question_type": "single_session"
+      },
+      {
+        "question": "Where does Bob work and what does his team do?",
+        "answer": "Alibaba Cloud, GNN for fraud detection",
+        "question_type": "multi_session"
+      },
+      {
+        "question": "What is the name of Bob's dog and how old is it?",
+        "answer": "DouDou, 4 years old",
+        "question_type": "single_session"
+      },
+      {
+        "question": "What language has Alice been learning?",
+        "answer": "Japanese",
+        "question_type": "single_session"
+      },
+      {
+        "question": "When did Alice move to Beijing?",
+        "answer": "last month",
+        "question_type": "temporal"
+      },
+      {
+        "question": "What color scheme does Alice prefer for her editor?",
+        "answer": "dark mode, One Dark Pro",
+        "question_type": "single_session"
+      },
+      {
+        "question": "Did Alice mention owning a dog?",
+        "answer": "no",
+        "question_type": "adversarial"
+      },
+      {
+        "question": "Does Bob work at ByteDance?",
+        "answer": "no",
+        "question_type": "adversarial"
+      }
+    ]
+  },
+  {
+    "sample_id": "1",
+    "conversation": [
+      {
+        "session_id": 1,
+        "dialogue": [
+          {"speaker": "Charlie", "utterance": "I'm a PhD student at Peking University, researching quantum computing."},
+          {"speaker": "Diana", "utterance": "That sounds fascinating! I'm a product manager at Tencent."},
+          {"speaker": "Charlie", "utterance": "My thesis is about topological quantum error correction. I've been working on it for two years."},
+          {"speaker": "Diana", "utterance": "I lead the WeChat mini-program team. We have about 50 developers."},
+          {"speaker": "Charlie", "utterance": "I play guitar in a band on weekends. We perform at a bar in Wudaokou called Mao Livehouse."},
+          {"speaker": "Diana", "utterance": "I love music too! I go to concerts at least once a month. Last one was Jay Chou's concert in Shanghai."}
+        ]
+      },
+      {
+        "session_id": 2,
+        "dialogue": [
+          {"speaker": "Charlie", "utterance": "I published a paper in Nature Physics last month about quantum entanglement."},
+          {"speaker": "Diana", "utterance": "Congratulations! My team just launched a new feature for WeChat Pay."},
+          {"speaker": "Charlie", "utterance": "I'm vegetarian. I've been vegetarian for five years now."},
+          {"speaker": "Diana", "utterance": "I love Sichuan food. My favorite dish is mapo tofu."},
+          {"speaker": "Charlie", "utterance": "I use Arch Linux as my primary OS. I've been a Linux user for eight years."},
+          {"speaker": "Diana", "utterance": "I'm a Mac person. I have a MacBook Pro M3 Max."}
+        ]
+      },
+      {
+        "session_id": 3,
+        "dialogue": [
+          {"speaker": "Charlie", "utterance": "My advisor is Professor Zhang Wei. He's one of the top researchers in quantum computing in China."},
+          {"speaker": "Diana", "utterance": "I report to VP Li Ming. He joined Tencent from Google three years ago."},
+          {"speaker": "Charlie", "utterance": "I'm attending QIP 2026 in Zurich next month to present our latest results."},
+          {"speaker": "Diana", "utterance": "I'll be at MWC Barcelona in February to showcase our 5G integration work."},
+          {"speaker": "Charlie", "utterance": "My favorite framework for quantum simulation is Qiskit. I also use Cirq sometimes."},
+          {"speaker": "Diana", "utterance": "We use React Native for mini-program development. It's been working well for cross-platform."}
+        ]
+      }
+    ],
+    "questions": [
+      {
+        "question": "What is Charlie researching?",
+        "answer": "quantum computing",
+        "question_type": "single_session"
+      },
+      {
+        "question": "Where does Diana work?",
+        "answer": "Tencent",
+        "question_type": "single_session"
+      },
+      {
+        "question": "What is Charlie's thesis about?",
+        "answer": "topological quantum error correction",
+        "question_type": "single_session"
+      },
+      {
+        "question": "What band instrument does Charlie play?",
+        "answer": "guitar",
+        "question_type": "single_session"
+      },
+      {
+        "question": "What paper did Charlie publish?",
+        "answer": "Nature Physics, about quantum entanglement",
+        "question_type": "multi_session"
+      },
+      {
+        "question": "What is Charlie's dietary preference?",
+        "answer": "vegetarian",
+        "question_type": "single_session"
+      },
+      {
+        "question": "Who is Charlie's advisor?",
+        "answer": "Professor Zhang Wei",
+        "question_type": "single_session"
+      },
+      {
+        "question": "What conference is Charlie attending next month?",
+        "answer": "QIP 2026 in Zurich",
+        "question_type": "single_session"
+      },
+      {
+        "question": "What team does Diana lead at Tencent?",
+        "answer": "WeChat mini-program team",
+        "question_type": "single_session"
+      },
+      {
+        "question": "What operating system does Charlie use?",
+        "answer": "Arch Linux",
+        "question_type": "single_session"
+      },
+      {
+        "question": "What framework does Diana's team use for development?",
+        "answer": "React Native",
+        "question_type": "single_session"
+      },
+      {
+        "question": "Does Charlie work at Tencent?",
+        "answer": "no",
+        "question_type": "adversarial"
+      },
+      {
+        "question": "Is Diana a PhD student?",
+        "answer": "no",
+        "question_type": "adversarial"
+      }
+    ]
+  },
+  {
+    "sample_id": "2",
+    "conversation": [
+      {
+        "session_id": 1,
+        "dialogue": [
+          {"speaker": "Eve", "utterance": "I'm a freelance photographer. I specialize in landscape and street photography."},
+          {"speaker": "Frank", "utterance": "Cool! I'm a data scientist at Meituan. I work on delivery route optimization."},
+          {"speaker": "Eve", "utterance": "I just came back from a two-week trip to Iceland. The northern lights were incredible."},
+          {"speaker": "Frank", "utterance": "I went to Japan last spring. Cherry blossom season in Kyoto was beautiful."},
+          {"speaker": "Eve", "utterance": "I use a Sony A7R V camera with a 24-70mm f/2.8 GM lens."},
+          {"speaker": "Frank", "utterance": "I just use my iPhone 15 Pro for photos. Computational photography has come a long way."}
+        ]
+      },
+      {
+        "session_id": 2,
+        "dialogue": [
+          {"speaker": "Eve", "utterance": "I had a photography exhibition at the 798 Art District last month. About 200 people attended."},
+          {"speaker": "Frank", "utterance": "That's impressive! I gave a talk at PyCon China about our ML pipeline."},
+          {"speaker": "Eve", "utterance": "I'm learning video editing with DaVinci Resolve. I want to start a YouTube channel."},
+          {"speaker": "Frank", "utterance": "I run a tech blog on Zhihu. I write about machine learning and data engineering."},
+          {"speaker": "Eve", "utterance": "My next project is documenting the disappearing hutongs in Beijing."},
+          {"speaker": "Frank", "utterance": "That sounds meaningful. I'm working on a side project using computer vision for food recognition."}
+        ]
+      },
+      {
+        "session_id": 3,
+        "dialogue": [
+          {"speaker": "Eve", "utterance": "I won second place in the National Geographic Photo Contest last year."},
+          {"speaker": "Frank", "utterance": "Amazing! Our team at Meituan won the internal AI Innovation Award this quarter."},
+          {"speaker": "Eve", "utterance": "I prefer shooting during golden hour. The light is perfect around 5pm in winter."},
+          {"speaker": "Frank", "utterance": "I'm a morning person. I do my best coding between 7am and 11am."},
+          {"speaker": "Eve", "utterance": "I'm selling prints on my website. A 60x90cm print sells for about 2000 yuan."},
+          {"speaker": "Frank", "utterance": "I invest in index funds. I put about 30% of my salary into CSI 300 ETF every month."}
+        ]
+      }
+    ],
+    "questions": [
+      {
+        "question": "What does Eve do for a living?",
+        "answer": "freelance photographer",
+        "question_type": "single_session"
+      },
+      {
+        "question": "Where does Frank work?",
+        "answer": "Meituan",
+        "question_type": "single_session"
+      },
+      {
+        "question": "Where did Eve travel recently?",
+        "answer": "Iceland",
+        "question_type": "single_session"
+      },
+      {
+        "question": "What camera does Eve use?",
+        "answer": "Sony A7R V",
+        "question_type": "single_session"
+      },
+      {
+        "question": "What exhibition did Eve have?",
+        "answer": "photography exhibition at 798 Art District",
+        "question_type": "single_session"
+      },
+      {
+        "question": "What award did Eve win?",
+        "answer": "second place in National Geographic Photo Contest",
+        "question_type": "single_session"
+      },
+      {
+        "question": "What is Eve's next project?",
+        "answer": "documenting disappearing hutongs in Beijing",
+        "question_type": "single_session"
+      },
+      {
+        "question": "What does Frank's team do at Meituan?",
+        "answer": "delivery route optimization",
+        "question_type": "single_session"
+      },
+      {
+        "question": "What time does Frank prefer to work?",
+        "answer": "between 7am and 11am",
+        "question_type": "single_session"
+      },
+      {
+        "question": "What tool does Eve use for video editing?",
+        "answer": "DaVinci Resolve",
+        "question_type": "single_session"
+      },
+      {
+        "question": "Does Eve work at Meituan?",
+        "answer": "no",
+        "question_type": "adversarial"
+      },
+      {
+        "question": "Is Frank a photographer?",
+        "answer": "no",
+        "question_type": "adversarial"
+      }
+    ]
+  }
+]

@@ -124,3 +124,42 @@ Research findings:
 
 Respond with ONLY the summary text to store (no JSON, no formatting).
 """
+
+FACT_EXTRACTION_PROMPT = """Extract discrete facts from this conversation exchange. Each fact must be a single, self-contained statement useful for future reference.
+
+Rules:
+- Extract ONLY new information revealed in this exchange (not greetings, not restating known info)
+- Each fact is one sentence, standalone (no pronouns like "he", "it", "this" without referent)
+- Include specific names, dates, numbers, preferences, decisions, relationships
+- Do NOT extract opinions, emotions, or transient states
+- Do NOT extract information that is general knowledge (e.g. "Paris is the capital of France")
+- If no meaningful facts are present, return an empty list
+
+User: {user_message}
+Assistant: {assistant_message}
+
+Respond with ONLY a JSON object: {{"facts": ["fact1", "fact2", ...]}}
+Return {{"facts": []}} if no extractable facts.
+"""
+
+FACT_CONFLICT_PROMPT = """A new fact conflicts with or duplicates an existing memory.
+
+New fact: {new_fact}
+Existing memory (similarity: {score}): {existing_fact}
+
+Decide:
+- "update": The new fact supersedes or refines the existing one. Provide the merged text.
+- "skip": The existing memory already covers this. No change needed.
+
+Respond with ONLY a JSON object:
+{{"decision": "update|skip", "merged": "merged fact text (only if update)", "reason": "..."}}
+"""
+
+CONSOLIDATION_MERGE_PROMPT = """Merge these similar memory entries into one concise, complete fact.
+Remove redundancy. Keep all unique information. Output a single sentence.
+
+Entries:
+{entries}
+
+Respond with ONLY the merged fact text (no JSON, no explanation).
+"""

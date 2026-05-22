@@ -123,4 +123,4 @@ class CoreMemory:
             else:
                 block = Block(label=label, value=value)
             blocks.append(block)
-        return cls(blocks=blocks)
+        return cls(blocks=blocks or None)

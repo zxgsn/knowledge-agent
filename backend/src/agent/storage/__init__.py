@@ -30,7 +30,7 @@ def ensure_recall_table() -> None:
     import psycopg
     from pgvector.psycopg import register_vector
 
-    conn = psycopg.connect(get_db_url())
+    conn = psycopg.connect(get_db_url(), connect_timeout=5)
     register_vector(conn)
     conn.execute("""
         CREATE TABLE IF NOT EXISTS recall_memory (
