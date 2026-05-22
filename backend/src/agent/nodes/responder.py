@@ -34,7 +34,6 @@ async def respond(state: AgentState, config: RunnableConfig) -> dict:
         api_key=configurable.llm_api_key,
         temperature=0.5,
         http_async_client=httpx.AsyncClient(proxy=None),
-        extra_body={"thinking": {"type": "enabled"}},
     )
 
     core_memory = CoreMemory.from_dict(state.get("core_memory", {}))
@@ -114,7 +113,6 @@ async def respond(state: AgentState, config: RunnableConfig) -> dict:
             api_key=configurable.llm_api_key,
             temperature=0.2,
             http_async_client=httpx.AsyncClient(proxy=None),
-            extra_body={"thinking": {"type": "enabled"}},
         )
         for label in needs_compression:
             await core_memory.compress_block(label, compress_llm)

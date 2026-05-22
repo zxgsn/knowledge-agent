@@ -36,7 +36,6 @@ def _get_llm(config: Configuration, temperature: float = 0.0) -> ChatOpenAI:
         api_key=config.llm_api_key,
         temperature=temperature,
         http_async_client=httpx.AsyncClient(proxy=None),
-        extra_body={"thinking": {"type": "enabled"}},
     )
 
 

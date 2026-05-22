@@ -41,7 +41,6 @@ async def route_intent(state: AgentState, config: RunnableConfig) -> dict:
         api_key=configurable.llm_api_key,
         temperature=0,
         http_async_client=httpx.AsyncClient(proxy=None),
-        extra_body={"thinking": {"type": "enabled"}},
     )
 
     user_msg = ""
@@ -336,7 +335,6 @@ async def save_to_archival(state: AgentState, config: RunnableConfig) -> dict:
         api_key=configurable.llm_api_key,
         temperature=0.3,
         http_async_client=httpx.AsyncClient(proxy=None),
-        extra_body={"thinking": {"type": "enabled"}},
     )
 
     research_topic = _get_research_topic(state["messages"])
