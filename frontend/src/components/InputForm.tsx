@@ -1,6 +1,6 @@
-import { useState } from "react";
+import { useState, useRef, useCallback } from "react";
 import { Button } from "@/components/ui/button";
-import { SquarePen, Brain, Send, StopCircle, Search, MessageSquare, Database, FileUp } from "lucide-react";
+import { SquarePen, Brain, Send, StopCircle, Search, MessageSquare, Database, FileUp, X } from "lucide-react";
 import { Textarea } from "@/components/ui/textarea";
 import {
   Select,
@@ -25,9 +25,90 @@ export const InputForm: React.FC<InputFormProps> = ({
 }) => {
   const [internalInputValue, setInternalInputValue] = useState("");
   const [mode, setMode] = useState("chat");
+  const [pendingFile, setPendingFile] = useState<{ name: string; base64: string } | null>(null);
+  const [isDragging, setIsDragging] = useState(false);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const dragCounterRef = useRef(0);
+
+  const readFileAsBase64 = useCallback((file: File): Promise<string> => {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => {
+        const result = reader.result as string;
+        // Strip the data:application/pdf;base64, prefix
+        const base64 = result.split(",")[1] || "";
+        resolve(base64);
+      };
+      reader.onerror = reject;
+      reader.readAsDataURL(file);
+    });
+  }, []);
+
+  const handleFile = useCallback(async (file: File) => {
+    if (file.type !== "application/pdf") {
+      alert("Only PDF files are supported.");
+      return;
+    }
+    if (file.size > 20 * 1024 * 1024) {
+      alert("File too large. Maximum size is 20MB.");
+      return;
+    }
+    const base64 = await readFileAsBase64(file);
+    setPendingFile({ name: file.name, base64 });
+    setMode("ingest");
+  }, [readFileAsBase64]);
+
+  const handleDragEnter = useCallback((e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    dragCounterRef.current++;
+    if (e.dataTransfer.types.includes("Files")) {
+      setIsDragging(true);
+    }
+  }, []);
+
+  const handleDragLeave = useCallback((e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    dragCounterRef.current--;
+    if (dragCounterRef.current === 0) {
+      setIsDragging(false);
+    }
+  }, []);
+
+  const handleDragOver = useCallback((e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+  }, []);
+
+  const handleDrop = useCallback((e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setIsDragging(false);
+    dragCounterRef.current = 0;
+
+    const file = e.dataTransfer.files[0];
+    if (file) handleFile(file);
+  }, [handleFile]);
+
+  const handleFileSelect = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (file) handleFile(file);
+    // Reset input so the same file can be selected again
+    if (fileInputRef.current) fileInputRef.current.value = "";
+  }, [handleFile]);
 
   const handleInternalSubmit = (e?: React.FormEvent) => {
     if (e) e.preventDefault();
+
+    if (pendingFile) {
+      const msg = `[UPLOAD_PDF:${pendingFile.name}]${pendingFile.base64}[/UPLOAD_PDF]`;
+      onSubmit(msg, "ingest");
+      setPendingFile(null);
+      setInternalInputValue("");
+      return;
+    }
+
     if (!internalInputValue.trim()) return;
     onSubmit(internalInputValue, mode);
     setInternalInputValue("");
@@ -40,15 +121,44 @@ export const InputForm: React.FC<InputFormProps> = ({
     }
   };
 
-  const isSubmitDisabled = !internalInputValue.trim() || isLoading;
+  const isSubmitDisabled = (!internalInputValue.trim() && !pendingFile) || isLoading;
 
   return (
     <form
       onSubmit={handleInternalSubmit}
-      className="flex flex-col gap-2 p-3 pb-4"
+      className="relative flex flex-col gap-2 p-3 pb-4"
+      onDragEnter={handleDragEnter}
+      onDragLeave={handleDragLeave}
+      onDragOver={handleDragOver}
+      onDrop={handleDrop}
     >
+      {/* Drag overlay */}
+      {isDragging && (
+        <div className="absolute inset-0 z-50 flex items-center justify-center rounded-3xl border-2 border-dashed border-blue-400 bg-blue-400/10 backdrop-blur-sm pointer-events-none">
+          <div className="flex flex-col items-center gap-2 text-blue-300">
+            <FileUp className="h-10 w-10" />
+            <span className="text-lg font-medium">Drop PDF here</span>
+          </div>
+        </div>
+      )}
+
+      {/* Pending file indicator */}
+      {pendingFile && (
+        <div className="flex items-center gap-2 px-3 py-2 bg-neutral-600 rounded-xl text-sm text-neutral-200">
+          <FileUp className="h-4 w-4 text-yellow-400 shrink-0" />
+          <span className="truncate">{pendingFile.name}</span>
+          <button
+            type="button"
+            onClick={() => setPendingFile(null)}
+            className="ml-auto text-neutral-400 hover:text-neutral-200 cursor-pointer"
+          >
+            <X className="h-4 w-4" />
+          </button>
+        </div>
+      )}
+
       <div
-        className={`flex flex-row items-center justify-between text-white rounded-3xl rounded-bl-sm ${
+        className={`relative flex flex-row items-center justify-between text-white rounded-3xl rounded-bl-sm ${
           hasHistory ? "rounded-br-sm" : ""
         } break-words min-h-7 bg-neutral-700 px-4 pt-3`}
       >
@@ -135,6 +245,23 @@ export const InputForm: React.FC<InputFormProps> = ({
               </SelectContent>
             </Select>
           </div>
+          <Button
+            type="button"
+            variant="ghost"
+            className="bg-neutral-700 border-neutral-600 text-neutral-300 hover:text-neutral-100 hover:bg-neutral-600 cursor-pointer rounded-xl rounded-t-sm px-3"
+            onClick={() => fileInputRef.current?.click()}
+            title="Upload PDF"
+          >
+            <FileUp className="h-4 w-4" />
+            <span className="text-sm ml-1">PDF</span>
+          </Button>
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept=".pdf"
+            className="hidden"
+            onChange={handleFileSelect}
+          />
         </div>
         {hasHistory && (
           <Button

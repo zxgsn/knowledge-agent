@@ -140,19 +140,32 @@ interface HumanMessageBubbleProps {
   mdComponents: typeof mdComponents;
 }
 
+// Format user message for display (hide PDF base64 data)
+function formatUserMessage(content: string): string {
+  const pdfMatch = content.match(
+    /^\[UPLOAD_PDF:(.+?)\].+?\[\/UPLOAD_PDF\]$/s
+  );
+  if (pdfMatch) {
+    return `📄 Uploaded: **${pdfMatch[1]}**`;
+  }
+  return content;
+}
+
 // HumanMessageBubble Component
 const HumanMessageBubble: React.FC<HumanMessageBubbleProps> = ({
   message,
   mdComponents,
 }) => {
+  const displayContent =
+    typeof message.content === "string"
+      ? formatUserMessage(message.content)
+      : JSON.stringify(message.content);
   return (
     <div
       className={`text-white rounded-3xl break-words min-h-7 bg-neutral-700 max-w-[100%] sm:max-w-[90%] px-4 pt-3 rounded-br-lg`}
     >
       <ReactMarkdown components={mdComponents}>
-        {typeof message.content === "string"
-          ? message.content
-          : JSON.stringify(message.content)}
+        {displayContent}
       </ReactMarkdown>
     </div>
   );

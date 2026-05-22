@@ -398,21 +398,37 @@ def _get_research_topic(messages: list) -> str:
 
 
 async def ingest_document_node(state: AgentState, config: RunnableConfig) -> dict:
-    """Ingest a document (URL or text) into the knowledge base.
+    """Ingest a document (URL, text, or PDF) into the knowledge base.
 
     Extracts text -> chunks -> embeds -> stores in archival memory.
+    Supports PDF upload via base64 encoding from the frontend.
     """
+    import base64
     from datetime import datetime, timezone
 
-    from agent.storage.ingestion import ingest_text, ingest_url
+    from agent.storage.ingestion import ingest_pdf, ingest_text, ingest_url
 
     doc_source = state.get("doc_source", "")
     source_type = state.get("doc_source_type", "url")
+    pdf_filename = ""
 
     if not doc_source:
         for msg in reversed(state["messages"]):
             if isinstance(msg, HumanMessage):
                 content = msg.content
+
+                # Check for PDF upload from frontend
+                pdf_match = re.match(
+                    r"\[UPLOAD_PDF:(.+?)\](.+?)\[/UPLOAD_PDF\]",
+                    content,
+                    re.DOTALL,
+                )
+                if pdf_match:
+                    pdf_filename = pdf_match.group(1)
+                    doc_source = pdf_match.group(2).strip()
+                    source_type = "pdf"
+                    break
+
                 url_match = re.search(r"https?://\S+", content)
                 if url_match:
                     doc_source = url_match.group(0)
@@ -426,7 +442,13 @@ async def ingest_document_node(state: AgentState, config: RunnableConfig) -> dic
         return {"ingest_result": "Error: No document source provided."}
 
     try:
-        if source_type == "url":
+        if source_type == "pdf":
+            pdf_bytes = base64.b64decode(doc_source)
+            chunks = await ingest_pdf(pdf_bytes, filename=pdf_filename or "document.pdf")
+            if not chunks:
+                return {"ingest_result": f"Failed to extract text from PDF: {pdf_filename}"}
+            doc_label = pdf_filename or "document.pdf"
+        elif source_type == "url":
             title, chunks = await ingest_url(doc_source)
             if not chunks:
                 return {"ingest_result": f"Failed to extract text from URL: {doc_source}"}
@@ -449,10 +471,17 @@ async def ingest_document_node(state: AgentState, config: RunnableConfig) -> dic
             _sync_put_batch_to_archival, entries, "ingested"
         )
 
+        if source_type == "pdf":
+            source_desc = f"PDF: {doc_label}"
+        elif source_type == "url":
+            source_desc = f"URL: {doc_source}"
+        else:
+            source_desc = "plain text"
+
         result = (
             f"Ingested '{doc_label}': {len(chunks)} chunks extracted, "
             f"{len(entry_ids)} stored in archival memory. "
-            f"Source: {doc_source if source_type == 'url' else 'plain text'}."
+            f"Source: {source_desc}."
         )
 
         # Log memory operation
