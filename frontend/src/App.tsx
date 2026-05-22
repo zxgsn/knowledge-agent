@@ -108,8 +108,12 @@ export default function App() {
       }
     },
     onError: (error: any) => {
+      // Ignore cancellation errors — these happen when a user interrupts a running stream
       const msg =
         error?.message ?? error?.error ?? (typeof error === "string" ? error : "An error occurred");
+      if (msg.includes("CancelledError") || msg.includes("User interrupted")) {
+        return;
+      }
       setError(msg);
     },
   });
@@ -145,6 +149,12 @@ export default function App() {
   const handleSubmit = useCallback(
     (submittedInputValue: string, mode: string) => {
       if (!submittedInputValue.trim()) return;
+
+      // Cancel any in-progress run before submitting a new one
+      if (thread.isLoading) {
+        thread.stop();
+      }
+
       setProcessedEventsTimeline([]);
       setError(null);
       hasFinalizeEventOccurredRef.current = false;
