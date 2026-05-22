@@ -23,6 +23,7 @@ from agent.prompts import (
     CONSOLIDATION_MERGE_PROMPT,
     FACT_CONFLICT_PROMPT,
     FACT_EXTRACTION_PROMPT,
+    MEMORY_UPDATE_PROMPT,
 )
 from agent.state import AgentState
 
@@ -178,10 +179,54 @@ def _sync_get_all_facts(namespace: str = "conversation_facts", limit: int = 500)
     return results
 
 
+def _sync_get_existing_memories(
+    query: str, namespace: str = "conversation_facts", limit: int = 10
+) -> list[dict]:
+    """Get existing memories relevant to a query for the update prompt."""
+    import psycopg
+    from pgvector import Vector
+    from pgvector.psycopg import register_vector
+    from agent.storage import get_db_url, get_embeddings
+
+    try:
+        embeddings = get_embeddings()
+        query_embedding = Vector(embeddings.embed_query(query))
+    except Exception:
+        return []
+
+    try:
+        conn = psycopg.connect(get_db_url(), connect_timeout=5)
+    except Exception:
+        return []
+
+    register_vector(conn)
+    rows = conn.execute(
+        """
+        SELECT id, content, metadata
+        FROM archival_memory
+        WHERE namespace = %s
+        ORDER BY embedding <=> %s::vector
+        LIMIT %s
+        """,
+        (namespace, query_embedding, int(limit)),
+    ).fetchall()
+    conn.close()
+
+    results = []
+    for row in rows:
+        meta = row[2] if isinstance(row[2], dict) else json.loads(row[2])
+        results.append({"id": row[0], "content": row[1], "metadata": meta})
+    return results
+
+
 # --- Graph nodes ---
 
 async def memory_pipeline(state: AgentState, config: RunnableConfig) -> dict:
-    """Extract facts from the latest exchange and store in archival memory."""
+    """Extract facts from the latest exchange and store in archival memory.
+
+    Uses a single-step LLM call with existing memory context to decide
+    ADD/UPDATE/DELETE/NOOP operations (mem0-style).
+    """
     configurable = Configuration.from_runnable_config(config)
     turn_count = state.get("turn_count", 0) + 1
 
@@ -200,16 +245,42 @@ async def memory_pipeline(state: AgentState, config: RunnableConfig) -> dict:
     if not user_msg or not assistant_msg:
         return {"turn_count": turn_count}
 
-    # Extract facts via LLM
     llm = _get_llm(configurable, temperature=0.0)
-    extraction_prompt = FACT_EXTRACTION_PROMPT.format(
-        user_message=user_msg, assistant_message=assistant_msg
-    )
-    response = await llm.ainvoke(extraction_prompt)
-    parsed = _parse_json(response.content)
-    facts = parsed.get("facts", [])
 
-    if not facts:
+    # Search existing memories for context
+    search_query = user_msg[:200]
+    existing = await asyncio.to_thread(
+        _sync_get_existing_memories, search_query, "conversation_facts", 10
+    )
+
+    if existing:
+        # Use MEMORY_UPDATE_PROMPT with existing memory context
+        existing_text = "\n".join(
+            f"- [id: {m['id']}] {m['content']}" for m in existing
+        )
+        update_prompt = MEMORY_UPDATE_PROMPT.format(
+            existing_memories=existing_text,
+            user_message=user_msg,
+            assistant_message=assistant_msg,
+        )
+        response = await llm.ainvoke(update_prompt)
+        parsed = _parse_json(response.content)
+        operations = parsed.get("memory", [])
+    else:
+        # No existing memories — use simple extraction
+        extraction_prompt = FACT_EXTRACTION_PROMPT.format(
+            user_message=user_msg, assistant_message=assistant_msg
+        )
+        response = await llm.ainvoke(extraction_prompt)
+        parsed = _parse_json(response.content)
+        facts = parsed.get("facts", [])
+        # Convert to ADD operations
+        operations = [
+            {"id": f"new_{i}", "text": f, "event": "ADD"}
+            for i, f in enumerate(facts)
+        ]
+
+    if not operations:
         return {
             "turn_count": turn_count,
             "memory_operations": [{
@@ -219,61 +290,59 @@ async def memory_pipeline(state: AgentState, config: RunnableConfig) -> dict:
             }],
         }
 
-    # Dedup + upsert each fact
-    conflict_llm = _get_llm(configurable, temperature=0.0)
-    dedup_threshold = configurable.memory_dedup_threshold
+    # Execute operations
     stored_count = 0
     updated_count = 0
+    deleted_count = 0
     skipped_count = 0
     fact_log = []
 
-    for fact in facts:
-        similar = await asyncio.to_thread(
-            _sync_search_archival_for_dedup, fact, "conversation_facts", 3
-        )
+    for op in operations:
+        event = op.get("event", "ADD").upper()
+        text = op.get("text", "").strip()
+        op_id = op.get("id", "")
 
-        conflict = None
-        for s in similar:
-            if s["score"] >= dedup_threshold:
-                conflict = s
-                break
-
-        if conflict:
-            conflict_prompt = FACT_CONFLICT_PROMPT.format(
-                new_fact=fact,
-                existing_fact=conflict["content"],
-                score=f"{conflict['score']:.2f}",
-            )
-            conflict_response = await conflict_llm.ainvoke(conflict_prompt)
-            decision = _parse_json(conflict_response.content)
-
-            if decision.get("decision") == "update" and decision.get("merged"):
-                await asyncio.to_thread(
-                    _sync_update_archival,
-                    conflict["id"],
-                    decision["merged"],
-                    {"source": "memory_pipeline", "merged_from": fact[:50]},
-                )
-                updated_count += 1
-                fact_log.append({"fact": fact, "action": "updated", "existing_id": conflict["id"]})
-            else:
-                skipped_count += 1
-                fact_log.append({"fact": fact, "action": "skipped", "reason": decision.get("reason", "duplicate")})
-        else:
+        if event == "ADD" and text:
             entry_id = await asyncio.to_thread(
                 _sync_put_fact_to_archival,
-                fact,
+                text,
                 {"source": "conversation", "turn": turn_count},
             )
             stored_count += 1
-            fact_log.append({"fact": fact, "action": "stored", "entry_id": entry_id})
+            fact_log.append({"fact": text, "action": "stored", "entry_id": entry_id})
+
+        elif event == "UPDATE" and text and op_id:
+            old_memory = op.get("old_memory", "")
+            await asyncio.to_thread(
+                _sync_update_archival,
+                op_id,
+                text,
+                {"source": "memory_pipeline", "old_memory": old_memory[:80]},
+            )
+            updated_count += 1
+            fact_log.append({"fact": text, "action": "updated", "existing_id": op_id})
+
+        elif event == "DELETE" and op_id:
+            await asyncio.to_thread(_sync_delete_archival, op_id)
+            deleted_count += 1
+            fact_log.append({"fact": op.get("old_memory", ""), "action": "deleted", "entry_id": op_id})
+
+        elif event == "NONE":
+            skipped_count += 1
+            fact_log.append({"fact": text, "action": "skipped", "reason": "unchanged"})
+
+        else:
+            skipped_count += 1
+            fact_log.append({"fact": text, "action": "skipped", "reason": f"unknown_event:{event}"})
 
     memory_ops = [{
         "type": "pipeline_extract",
-        "facts_extracted": len(facts),
+        "facts_count": len(operations),
         "stored": stored_count,
         "updated": updated_count,
+        "deleted": deleted_count,
         "skipped": skipped_count,
+        "existing_memories": len(existing),
         "turn_count": turn_count,
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }]

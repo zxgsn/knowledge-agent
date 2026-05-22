@@ -162,6 +162,32 @@ Respond with ONLY a JSON object:
 {{"decision": "update|skip", "merged": "merged fact text (only if update)", "reason": "..."}}
 """
 
+MEMORY_UPDATE_PROMPT = """You are a memory manager. Given existing memories and a new conversation, decide which memories to ADD, UPDATE, DELETE, or leave unchanged (NONE).
+
+## Existing Memories
+{existing_memories}
+
+## New Conversation
+User: {user_message}
+Assistant: {assistant_message}
+
+## Rules
+- **ADD**: New information not covered by any existing memory. Generate a new ID like "new_0", "new_1".
+- **UPDATE**: The conversation provides new info that changes or refines an existing memory. Keep the same ID, write the updated text. Set "old_memory" to the original text.
+- **DELETE**: The conversation contradicts or invalidates an existing memory (e.g. user moved cities, changed jobs, revoked a preference). Keep the same ID.
+- **NONE**: The existing memory is still accurate, no change needed. Do NOT include NONE entries in output.
+- Each memory text should be a self-contained factual statement (one sentence, include specific names/dates/numbers).
+- Do NOT extract greetings, opinions, emotions, or general knowledge.
+- If the conversation contains no memory-worthy information, return {{"memory": []}}.
+
+Respond with ONLY a JSON object:
+{{"memory": [
+  {{"id": "new_0", "text": "...", "event": "ADD"}},
+  {{"id": "existing_id_here", "text": "updated text...", "event": "UPDATE", "old_memory": "original text..."}},
+  {{"id": "existing_id_here", "text": "", "event": "DELETE"}}
+]}}
+"""
+
 CONSOLIDATION_MERGE_PROMPT = """Merge these similar memory entries into one concise, complete fact.
 Remove redundancy. Keep all unique information. Output a single sentence.
 

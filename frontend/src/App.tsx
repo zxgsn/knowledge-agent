@@ -77,18 +77,21 @@ export default function App() {
         const memOps = event.memory_pipeline?.memory_operations;
         const extractOp = Array.isArray(memOps) ? memOps.find((op: any) => op.type === "pipeline_extract") : null;
         if (extractOp) {
-          const extracted = extractOp.facts_extracted ?? 0;
+          const extracted = extractOp.facts_count ?? 0;
           const stored = extractOp.stored ?? 0;
           const updated = extractOp.updated ?? 0;
+          const deleted = extractOp.deleted ?? 0;
           const skipped = extractOp.skipped ?? 0;
+          const existing = extractOp.existing_memories ?? 0;
           if (extracted > 0) {
             const parts = [];
-            if (stored > 0) parts.push(`${stored} stored`);
+            if (stored > 0) parts.push(`${stored} added`);
             if (updated > 0) parts.push(`${updated} updated`);
-            if (skipped > 0) parts.push(`${skipped} skipped`);
+            if (deleted > 0) parts.push(`${deleted} deleted`);
+            if (skipped > 0) parts.push(`${skipped} unchanged`);
             processedEvent = {
               title: "Memory Pipeline",
-              data: `Extracted ${extracted} facts: ${parts.join(", ")}`,
+              data: `${extracted} operations (${existing} existing): ${parts.join(", ")}`,
             };
           }
         }
