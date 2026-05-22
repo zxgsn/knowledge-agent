@@ -286,32 +286,32 @@ def create_memory_tools(
                 source_type: "url" to fetch from a web URL, "text" for plain text input.
                 chunk_size: Target chunk size in characters (default 800).
             """
-            import asyncio
-            from agent.storage.ingestion import ingest_text, ingest_url
+            import httpx
+            from agent.storage.ingestion import chunk_text
 
-            loop = asyncio.new_event_loop()
-            try:
-                if source_type == "url":
-                    title, chunks = loop.run_until_complete(
-                        ingest_url(source, chunk_size=chunk_size)
-                    )
-                    if not chunks:
-                        return f"Failed to extract text from URL: {source}"
-                    doc_label = title
-                else:
-                    chunks = loop.run_until_complete(
-                        ingest_text(
-                            content=source,
-                            source_name="manual_text",
-                            source_type="text",
-                            chunk_size=chunk_size,
-                        )
-                    )
-                    if not chunks:
-                        return "No text content to ingest."
-                    doc_label = "manual_text"
-            finally:
-                loop.close()
+            if source_type == "url":
+                try:
+                    resp = httpx.get(source, follow_redirects=True, timeout=30)
+                    resp.raise_for_status()
+                except Exception as e:
+                    return f"Failed to fetch URL: {e}"
+
+                from bs4 import BeautifulSoup
+                soup = BeautifulSoup(resp.text, "html.parser")
+                for tag in soup(["script", "style", "nav", "footer", "header"]):
+                    tag.decompose()
+                text = soup.get_text(separator="\n", strip=True)
+                doc_label = soup.title.string if soup.title else source
+            else:
+                text = source
+                doc_label = "manual_text"
+
+            if not text or len(text.strip()) < 50:
+                return "No meaningful text content to ingest."
+
+            chunks = chunk_text(text, chunk_size=chunk_size, source=doc_label)
+            if not chunks:
+                return "Failed to chunk document."
 
             ids = []
             for c in chunks:
@@ -320,7 +320,7 @@ def create_memory_tools(
                     namespace="ingested",
                     metadata={
                         "source": c.source,
-                        "source_type": c.source_type,
+                        "source_type": source_type,
                         "chunk_index": c.index,
                         "document": doc_label,
                     },

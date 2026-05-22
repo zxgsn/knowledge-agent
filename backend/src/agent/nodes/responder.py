@@ -92,7 +92,9 @@ async def respond(state: AgentState, config: RunnableConfig) -> dict:
         for tc in response.tool_calls:
             tool = tools_by_name.get(tc["name"])
             if tool:
-                result = tool.invoke(tc["args"])
+                # Run tool in thread to avoid blocking the event loop
+                # (archival tools use sync psycopg which blockbuster flags)
+                result = await asyncio.to_thread(tool.invoke, tc["args"])
             else:
                 result = f"Unknown tool: {tc['name']}"
             messages_for_llm.append({
