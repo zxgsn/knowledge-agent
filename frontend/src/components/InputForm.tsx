@@ -115,7 +115,7 @@ export const InputForm: React.FC<InputFormProps> = ({
   };
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
-    if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) {
+    if (e.key === "Enter" && !e.shiftKey && !e.ctrlKey && !e.metaKey) {
       e.preventDefault();
       handleInternalSubmit();
     }
@@ -166,7 +166,7 @@ export const InputForm: React.FC<InputFormProps> = ({
           value={internalInputValue}
           onChange={(e) => setInternalInputValue(e.target.value)}
           onKeyDown={handleKeyDown}
-          placeholder="Ask a question, research a topic, or paste a URL to ingest..."
+          placeholder="Ask a question, research a topic, or paste a URL to ingest... (Enter to send, Ctrl+Enter for new line)"
           className="w-full text-neutral-100 placeholder-neutral-500 resize-none border-0 focus:outline-none focus:ring-0 outline-none focus-visible:ring-0 shadow-none md:text-base min-h-[56px] max-h-[200px]"
           rows={1}
         />
