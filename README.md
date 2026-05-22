@@ -331,6 +331,9 @@ knowledge-agent/
 - [ ] **Feishu Integration** — Direct integration with Feishu (Lark) for bidirectional sync: ingest Feishu docs into the knowledge base, and export agent findings back to Feishu documents.
 - [ ] **Cross-encoder Re-ranking** — Add a re-ranking stage (e.g. `BAAI/bge-reranker-v2-m3`) after hybrid retrieval to improve result ordering.
 - [ ] **Recall Memory Integration** — Use conversation history in recall_memory to provide long-term conversational context across sessions.
+- [ ] **Improved Text Chunking** — Current chunking uses paragraph-first splitting with fixed size (800 chars) and character-level overlap. Issues: no semantic boundary awareness, poor handling of tables/lists/code blocks, fixed chunk size ignores content structure. Explore semantic chunking (e.g. embedding-based boundary detection) or agentic chunking (LLM-guided splitting) for better retrieval quality.
+- [ ] **Memory Pipeline Optimization** — Current mem0-style pipeline (extract → dedup → upsert) runs after every response turn, adding latency. Fact extraction quality depends heavily on LLM capability; dedup uses a fixed cosine threshold (0.8) which may miss near-duplicates or over-merge distinct facts. Explore: batched/async pipeline execution, adaptive dedup thresholds, fact confidence scoring, and conflict resolution strategies beyond simple merge/skip.
+- [ ] **Auto-organize Document Deduplication** — Build an agent that periodically scans archival memory for duplicate or overlapping content across ingested documents, research summaries, and conversation facts. Use embedding clustering + LLM judgment to detect redundancy, merge overlapping entries, and maintain a clean, well-organized knowledge base without manual intervention.
 
 ## Acknowledgments
 
