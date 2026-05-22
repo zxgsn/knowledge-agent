@@ -64,7 +64,17 @@ async def respond(state: AgentState, config: RunnableConfig) -> dict:
         messages_for_llm = [{"role": "system", "content": system}]
         for msg in state["messages"][-20:]:
             if isinstance(msg, HumanMessage):
-                messages_for_llm.append({"role": "user", "content": msg.content})
+                content = msg.content
+                # Replace PDF base64 data with a short summary
+                import re as _re
+                pdf_match = _re.match(
+                    r"\[UPLOAD_PDF:(.+?)\].+?\[/UPLOAD_PDF\]",
+                    content,
+                    _re.DOTALL,
+                )
+                if pdf_match:
+                    content = f"[Uploaded PDF: {pdf_match.group(1)}. Document has been ingested into archival memory.]"
+                messages_for_llm.append({"role": "user", "content": content})
             elif isinstance(msg, AIMessage) and msg.content:
                 messages_for_llm.append({"role": "assistant", "content": msg.content})
         if archival_context:
