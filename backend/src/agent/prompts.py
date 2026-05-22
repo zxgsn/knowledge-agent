@@ -73,7 +73,7 @@ Use "ingest" ONLY when the user provides a URL, file path, or pasted text to imp
 
 User message: {user_message}
 
-Respond with ONLY a JSON object: {{"mode": "chat|research|memory_edit|ingest", "need_recall": true/false, "reason": "..."}}
+Respond with ONLY a JSON object: {{"mode": "chat|research|recall|memory_edit|ingest", "need_recall": true/false, "reason": "..."}}
 
 Set "need_recall" to true for most queries — the archival memory may contain relevant prior research. Only set to false for pure greetings, simple math, or purely creative/roleplay requests.
 """

@@ -43,7 +43,8 @@ def route_after_intent(state: AgentState) -> str:
     mode = state.get("mode", "chat")
     if mode == "ingest":
         return "ingest_document"
-    # All other modes go through recall_memory → evaluate_recall
+    if mode in ("chat", "memory_edit") or not state.get("need_recall", True):
+        return "respond"
     return "recall_memory"
 
 
@@ -117,7 +118,7 @@ builder.add_node("consolidate_memory", consolidate_memory)
 builder.add_edge(START, "route_intent")
 builder.add_conditional_edges(
     "route_intent", route_after_intent,
-    ["ingest_document", "recall_memory"],
+    ["ingest_document", "recall_memory", "respond"],
 )
 builder.add_edge("recall_memory", "evaluate_recall")
 builder.add_conditional_edges(
