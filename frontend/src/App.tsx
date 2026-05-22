@@ -6,6 +6,7 @@ import { ProcessedEvent } from "@/components/ActivityTimeline";
 import { WelcomeScreen } from "@/components/WelcomeScreen";
 import { ChatMessagesView } from "@/components/ChatMessagesView";
 import { DocumentLibrary } from "@/components/DocumentLibrary";
+import { ThreadSidebar } from "@/components/ThreadSidebar";
 import { Button } from "@/components/ui/button";
 
 export default function App() {
@@ -18,6 +19,8 @@ export default function App() {
   const scrollAreaRef = useRef<HTMLDivElement>(null);
   const hasFinalizeEventOccurredRef = useRef(false);
   const [error, setError] = useState<string | null>(null);
+  const [sidebarOpen, setSidebarOpen] = useState(false);
+  const [currentThreadId, setCurrentThreadId] = useState<string | null>(null);
   const thread = useStream<{
     messages: Message[];
     core_memory: Record<string, string>;
@@ -28,6 +31,7 @@ export default function App() {
       : "http://localhost:8123",
     assistantId: "agent",
     messagesKey: "messages",
+    threadId: currentThreadId ?? undefined,
     onUpdateEvent: (event: any) => {
       let processedEvent: ProcessedEvent | null = null;
       if (event.route_intent) {
@@ -250,6 +254,13 @@ export default function App() {
     thread.stop();
   }, [thread]);
 
+  const handleThreadSelect = useCallback((threadId: string | null) => {
+    setCurrentThreadId(threadId);
+    setProcessedEventsTimeline([]);
+    setHistoricalActivities({});
+    setError(null);
+  }, []);
+
   return (
     <div className="flex h-screen bg-neutral-800 text-neutral-100 font-sans antialiased">
       <Routes>
@@ -257,7 +268,14 @@ export default function App() {
         <Route
           path="*"
           element={
-            <main className="h-full w-full max-w-4xl mx-auto">
+            <div className="flex h-full w-full">
+              <ThreadSidebar
+                currentThreadId={currentThreadId}
+                onThreadSelect={handleThreadSelect}
+                isOpen={sidebarOpen}
+                onToggle={() => setSidebarOpen(!sidebarOpen)}
+              />
+              <main className="h-full flex-1 max-w-4xl mx-auto">
               {error ? (
                 <div className="flex flex-col items-center justify-center h-full">
                   <div className="flex flex-col items-center justify-center gap-4">
@@ -289,6 +307,7 @@ export default function App() {
                 />
               )}
             </main>
+            </div>
           }
         />
       </Routes>

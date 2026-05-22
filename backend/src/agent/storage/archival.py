@@ -75,6 +75,38 @@ class ArchivalMemory:
             CREATE TRIGGER tsvectorupdate BEFORE INSERT OR UPDATE ON archival_memory
               FOR EACH ROW EXECUTE FUNCTION archival_memory_tsv_trigger()
         """)
+
+        # Documents table: stores full documents before chunking
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS documents (
+                id TEXT PRIMARY KEY,
+                title TEXT NOT NULL,
+                source TEXT,
+                source_type TEXT,
+                content_full TEXT NOT NULL,
+                chunk_count INT DEFAULT 0,
+                metadata JSONB DEFAULT '{}',
+                created_at TIMESTAMPTZ DEFAULT NOW()
+            )
+        """)
+        await conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_documents_created
+            ON documents (created_at DESC)
+        """)
+        await conn.execute("""
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_documents_title_source
+            ON documents (title, source)
+        """)
+
+        # Link archival_memory chunks to documents
+        await conn.execute(
+            "ALTER TABLE archival_memory ADD COLUMN IF NOT EXISTS document_id TEXT"
+        )
+        await conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_archival_document "
+            "ON archival_memory (document_id)"
+        )
+
         await conn.commit()
 
         return cls(conn=conn, embeddings=embeddings)

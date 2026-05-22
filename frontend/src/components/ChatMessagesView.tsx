@@ -1,10 +1,11 @@
 import type React from "react";
 import type { Message } from "@langchain/langgraph-sdk";
 import { ScrollArea } from "@/components/ui/scroll-area";
-import { Loader2, Copy, CopyCheck, BookMarked } from "lucide-react";
+import { Loader2, Copy, CopyCheck, BookMarked, BookOpen } from "lucide-react";
 import { InputForm } from "@/components/InputForm";
 import { Button } from "@/components/ui/button";
 import { useState, ReactNode } from "react";
+import { Link } from "react-router-dom";
 import ReactMarkdown from "react-markdown";
 import { cn } from "@/lib/utils";
 import { Badge } from "@/components/ui/badge";
@@ -295,6 +296,13 @@ export function ChatMessagesView({
   };
   return (
     <div className="flex flex-col h-full">
+      <Link
+        to="/library"
+        className="absolute top-4 right-4 z-10 flex items-center gap-1.5 text-sm text-neutral-400 hover:text-neutral-100 transition-colors"
+      >
+        <BookOpen className="w-4 h-4" />
+        Library
+      </Link>
       <ScrollArea className="flex-1 overflow-y-auto" ref={scrollAreaRef}>
         <div className="p-4 md:p-6 space-y-2 max-w-4xl mx-auto pt-16">
           {messages.map((message, index) => {

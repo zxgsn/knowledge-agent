@@ -71,7 +71,34 @@ def _sync_search_archival(query: str, limit: int = 5, alpha: float = 0.7) -> lis
     return results
 
 
-def _sync_put_to_archival(content: str, namespace: str, metadata: dict) -> str:
+def _sync_insert_document(title: str, source: str, source_type: str, content_full: str, chunk_count: int) -> tuple[str, bool]:
+    """Insert a document record. Returns (doc_id, is_new)."""
+    import psycopg
+    from agent.storage import get_db_url
+
+    conn = psycopg.connect(get_db_url(), connect_timeout=5)
+    doc_id = str(uuid.uuid4())
+    result = conn.execute(
+        "INSERT INTO documents (id, title, source, source_type, content_full, chunk_count) "
+        "VALUES (%s, %s, %s, %s, %s, %s) "
+        "ON CONFLICT (title, source) DO NOTHING "
+        "RETURNING id",
+        (doc_id, title, source, source_type, content_full, chunk_count),
+    )
+    row = result.fetchone()
+    if row:
+        conn.commit()
+        conn.close()
+        return row[0], True
+    existing = conn.execute(
+        "SELECT id FROM documents WHERE title = %s AND source = %s",
+        (title, source),
+    ).fetchone()
+    conn.close()
+    return existing[0], False
+
+
+def _sync_put_to_archival(content: str, namespace: str, metadata: dict, document_id: str | None = None) -> str:
     """Store a single entry in archival memory."""
     import psycopg
     from pgvector import Vector
@@ -86,9 +113,9 @@ def _sync_put_to_archival(content: str, namespace: str, metadata: dict) -> str:
     conn = psycopg.connect(get_db_url(), connect_timeout=5)
     register_vector(conn)
     conn.execute(
-        "INSERT INTO archival_memory (id, namespace, content, metadata, embedding) "
-        "VALUES (%s, %s, %s, %s, %s) ON CONFLICT (id) DO NOTHING",
-        (entry_id, namespace, content, json.dumps(metadata), embedding),
+        "INSERT INTO archival_memory (id, namespace, content, metadata, embedding, document_id) "
+        "VALUES (%s, %s, %s, %s, %s, %s) ON CONFLICT (id) DO NOTHING",
+        (entry_id, namespace, content, json.dumps(metadata), embedding, document_id),
     )
     conn.commit()
     conn.close()
@@ -322,6 +349,19 @@ def create_memory_tools(
             if not chunks:
                 return "Failed to chunk document."
 
+            # Write full document to documents table first
+            full_text = "\n\n".join(c.content for c in chunks)
+            document_id, is_new = _sync_insert_document(
+                doc_label,
+                source if source_type == "url" else doc_label,
+                source_type,
+                full_text,
+                len(chunks),
+            )
+
+            if not is_new:
+                return f"Document '{doc_label}' already exists in the library. Skipping."
+
             ids = []
             for c in chunks:
                 eid = _sync_put_to_archival(
@@ -332,7 +372,9 @@ def create_memory_tools(
                         "source_type": source_type,
                         "chunk_index": c.index,
                         "document": doc_label,
+                        "document_id": document_id,
                     },
+                    document_id=document_id,
                 )
                 ids.append(eid)
 

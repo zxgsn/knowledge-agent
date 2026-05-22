@@ -386,7 +386,7 @@ def _sync_put_to_archival(content: str, namespace: str, metadata: dict) -> str:
     return entry_id
 
 
-def _sync_put_batch_to_archival(entries: list[dict], namespace: str) -> list[str]:
+def _sync_put_batch_to_archival(entries: list[dict], namespace: str, document_id: str | None = None) -> list[str]:
     """Synchronous batch archival storage (runs in thread)."""
     import uuid
     from datetime import datetime, timezone
@@ -413,14 +413,43 @@ def _sync_put_batch_to_archival(entries: list[dict], namespace: str) -> list[str
         meta["timestamp"] = now
         ids.append(entry_id)
         conn.execute(
-            "INSERT INTO archival_memory (id, namespace, content, metadata, embedding) "
-            "VALUES (%s, %s, %s, %s, %s) ON CONFLICT (id) DO UPDATE SET "
+            "INSERT INTO archival_memory (id, namespace, content, metadata, embedding, document_id) "
+            "VALUES (%s, %s, %s, %s, %s, %s) ON CONFLICT (id) DO UPDATE SET "
             "content=EXCLUDED.content, metadata=EXCLUDED.metadata, embedding=EXCLUDED.embedding",
-            (entry_id, namespace, entry["content"], json.dumps(meta), Vector(emb)),
+            (entry_id, namespace, entry["content"], json.dumps(meta), Vector(emb), document_id),
         )
     conn.commit()
     conn.close()
     return ids
+
+
+def _sync_insert_document(title: str, source: str, source_type: str, content_full: str, chunk_count: int) -> tuple[str, bool]:
+    """Insert a document record. Returns (doc_id, is_new)."""
+    import psycopg
+    from agent.storage import get_db_url
+
+    conn = psycopg.connect(get_db_url(), connect_timeout=5)
+    import uuid
+    doc_id = str(uuid.uuid4())
+    result = conn.execute(
+        "INSERT INTO documents (id, title, source, source_type, content_full, chunk_count) "
+        "VALUES (%s, %s, %s, %s, %s, %s) "
+        "ON CONFLICT (title, source) DO NOTHING "
+        "RETURNING id",
+        (doc_id, title, source, source_type, content_full, chunk_count),
+    )
+    row = result.fetchone()
+    if row:
+        conn.commit()
+        conn.close()
+        return row[0], True
+    # Conflict — document already exists
+    existing = conn.execute(
+        "SELECT id FROM documents WHERE title = %s AND source = %s",
+        (title, source),
+    ).fetchone()
+    conn.close()
+    return existing[0], False
 
 
 async def save_to_archival(state: AgentState, config: RunnableConfig) -> dict:
@@ -560,12 +589,28 @@ async def ingest_document_node(state: AgentState, config: RunnableConfig) -> dic
                 return {"ingest_result": "No text content to ingest."}
             doc_label = "manual_text"
 
+        # Reconstruct full text from chunks for document storage
+        full_text = "\n\n".join(c.content for c in chunks)
+
+        # Write to documents table first
+        document_id, is_new = await asyncio.to_thread(
+            _sync_insert_document,
+            doc_label,
+            doc_source if source_type == "url" else doc_label,
+            source_type,
+            full_text,
+            len(chunks),
+        )
+
+        if not is_new:
+            return {"ingest_result": f"Document '{doc_label}' already exists in the library. Skipping."}
+
         entries = [
-            {"content": c.content, "metadata": {"source": c.source, "source_type": c.source_type, "chunk_index": c.index, "document": doc_label}}
+            {"content": c.content, "metadata": {"source": c.source, "source_type": c.source_type, "chunk_index": c.index, "document": doc_label, "document_id": document_id}}
             for c in chunks
         ]
         entry_ids = await asyncio.to_thread(
-            _sync_put_batch_to_archival, entries, "ingested"
+            _sync_put_batch_to_archival, entries, "ingested", document_id
         )
 
         if source_type == "pdf":

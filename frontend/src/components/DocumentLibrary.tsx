@@ -6,7 +6,7 @@ import { Badge } from "@/components/ui/badge";
 import { Card, CardContent } from "@/components/ui/card";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { ScrollArea } from "@/components/ui/scroll-area";
-import { ArrowLeft, Search, BookOpen, MessageSquare, RefreshCw } from "lucide-react";
+import { ArrowLeft, Search, BookOpen, MessageSquare, RefreshCw, FileText, ChevronDown, ChevronRight } from "lucide-react";
 
 interface ArchivalEntry {
   id: string;
@@ -30,6 +30,21 @@ interface NamespaceStats {
   count: number;
   oldest: string | null;
   newest: string | null;
+}
+
+interface DocumentSummary {
+  id: string;
+  title: string;
+  source: string | null;
+  source_type: string | null;
+  chunk_count: number;
+  created_at: string | null;
+}
+
+interface DocumentDetail extends DocumentSummary {
+  content_full: string;
+  metadata: Record<string, any>;
+  chunks: ArchivalEntry[];
 }
 
 const NAMESPACE_COLORS: Record<string, string> = {
@@ -65,6 +80,8 @@ export function DocumentLibrary() {
   const [search, setSearch] = useState("");
   const [entries, setEntries] = useState<ArchivalEntry[]>([]);
   const [recallEntries, setRecallEntries] = useState<RecallEntry[]>([]);
+  const [documents, setDocuments] = useState<DocumentSummary[]>([]);
+  const [selectedDoc, setSelectedDoc] = useState<DocumentDetail | null>(null);
   const [stats, setStats] = useState<NamespaceStats[]>([]);
   const [recallStats, setRecallStats] = useState({ message_count: 0, thread_count: 0 });
   const [selectedEntry, setSelectedEntry] = useState<ArchivalEntry | RecallEntry | null>(null);
@@ -82,6 +99,30 @@ export function DocumentLibrary() {
     } catch { /* ignore */ }
   }, []);
 
+  const fetchDocuments = useCallback(async () => {
+    setLoading(true);
+    try {
+      const params = new URLSearchParams({ limit: "100", offset: "0" });
+      if (search) params.set("search", search);
+      const res = await fetch(`/api/documents?${params}`);
+      if (res.ok) {
+        const data = await res.json();
+        setDocuments(data.documents);
+        setTotal(data.total);
+      }
+    } catch { /* ignore */ }
+    setLoading(false);
+  }, [search]);
+
+  const fetchDocDetail = useCallback(async (docId: string) => {
+    try {
+      const res = await fetch(`/api/documents/${docId}`);
+      if (res.ok) {
+        setSelectedDoc(await res.json());
+      }
+    } catch { /* ignore */ }
+  }, []);
+
   const fetchEntries = useCallback(async () => {
     setLoading(true);
     try {
@@ -95,9 +136,33 @@ export function DocumentLibrary() {
           setTotal(data.total);
         }
         setEntries([]);
+        setDocuments([]);
+      } else if (activeTab === "all") {
+        // Fetch both archival (filtered) and recall in parallel
+        const archParams = new URLSearchParams({ limit: "50", offset: "0", exclude_namespaces: EXCLUDE_NS_PARAM });
+        const recParams = new URLSearchParams({ limit: "50", offset: "0" });
+        if (search) { archParams.set("search", search); recParams.set("search", search); }
+        const [archRes, recRes] = await Promise.all([
+          fetch(`/api/archival/entries?${archParams}`),
+          fetch(`/api/recall/entries?${recParams}`),
+        ]);
+        let archTotal = 0;
+        if (archRes.ok) {
+          const data = await archRes.json();
+          setEntries(data.entries);
+          archTotal = data.total;
+        }
+        if (recRes.ok) {
+          const data = await recRes.json();
+          setRecallEntries(data.entries);
+          setTotal(archTotal + data.total);
+        } else {
+          setTotal(archTotal);
+        }
+        setDocuments([]);
       } else {
         const params = new URLSearchParams({ limit: "100", offset: "0" });
-        if (activeTab !== "all") params.set("namespace", activeTab);
+        params.set("namespace", activeTab);
         if (search) params.set("search", search);
         const res = await fetch(`/api/archival/entries?${params}`);
         if (res.ok) {
@@ -106,22 +171,48 @@ export function DocumentLibrary() {
           setTotal(data.total);
         }
         setRecallEntries([]);
+        setDocuments([]);
       }
     } catch { /* ignore */ }
     setLoading(false);
   }, [activeTab, search]);
 
+  const HIDDEN_NAMESPACES = ["locomo_baseline", "locomo_context", "locomo_extracted", "ingested", "conversation_facts"];
+  const EXCLUDE_NS_PARAM = HIDDEN_NAMESPACES.join(",");
+
+  const visibleStats = stats.filter((s) => !HIDDEN_NAMESPACES.includes(s.namespace));
+
+  const visibleEntries = entries.filter((e) => !HIDDEN_NAMESPACES.includes(e.namespace));
+
   useEffect(() => { fetchStats(); }, [fetchStats]);
-  useEffect(() => { fetchEntries(); }, [fetchEntries]);
+  useEffect(() => {
+    if (activeTab === "ingested") {
+      fetchDocuments();
+    } else {
+      fetchEntries();
+    }
+  }, [activeTab, search, fetchDocuments, fetchEntries]);
 
   const handleRefresh = () => {
     fetchStats();
-    fetchEntries();
+    if (activeTab === "ingested") {
+      fetchDocuments();
+    } else {
+      fetchEntries();
+    }
+  };
+
+  const handleDocClick = (doc: DocumentSummary) => {
+    if (selectedDoc?.id === doc.id) {
+      setSelectedDoc(null);
+    } else {
+      fetchDocDetail(doc.id);
+    }
   };
 
   return (
-    <div className="flex h-screen bg-neutral-800 text-neutral-100">
-      <div className="flex flex-col w-full max-w-6xl mx-auto p-6 gap-4">
+    <div className="flex justify-center w-full h-screen bg-neutral-800 text-neutral-100 overflow-auto">
+      <div className="flex flex-col w-[1024px] max-w-[calc(100vw-3rem)] p-6 gap-4">
         {/* Header */}
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-3">
@@ -140,7 +231,7 @@ export function DocumentLibrary() {
 
         {/* Stats bar */}
         <div className="flex gap-3 flex-wrap">
-          {stats.map((s) => (
+          {visibleStats.map((s) => (
             <Badge key={s.namespace} variant="outline" className="border-neutral-600 text-neutral-300">
               {s.namespace}: {s.count}
             </Badge>
@@ -165,7 +256,7 @@ export function DocumentLibrary() {
         <Tabs value={activeTab} onValueChange={setActiveTab} className="flex-1 flex flex-col min-h-0">
           <TabsList className="bg-neutral-700">
             <TabsTrigger value="all">All</TabsTrigger>
-            <TabsTrigger value="ingested">Ingested</TabsTrigger>
+            <TabsTrigger value="ingested">Documents</TabsTrigger>
             <TabsTrigger value="research">Research</TabsTrigger>
             <TabsTrigger value="manual">Manual</TabsTrigger>
             <TabsTrigger value="recall">
@@ -178,6 +269,79 @@ export function DocumentLibrary() {
             <ScrollArea className="h-full">
               {loading ? (
                 <div className="text-center text-neutral-500 py-12">Loading...</div>
+              ) : activeTab === "ingested" ? (
+                /* Document-level view for ingested tab */
+                documents.length === 0 ? (
+                  <div className="text-center text-neutral-500 py-12">No documents found.</div>
+                ) : (
+                  <div className="grid gap-2">
+                    {documents.map((doc) => (
+                      <Card
+                        key={doc.id}
+                        className={`bg-neutral-700 border-neutral-600 cursor-pointer hover:border-neutral-500 transition-colors ${
+                          selectedDoc?.id === doc.id ? "border-neutral-400" : ""
+                        }`}
+                        onClick={() => handleDocClick(doc)}
+                      >
+                        <CardContent className="p-3">
+                          <div className="flex items-center gap-2 mb-1">
+                            <FileText className="w-4 h-4 text-sky-400" />
+                            <span className="text-sm font-medium text-neutral-100">
+                              {doc.title}
+                            </span>
+                            <Badge variant="outline" className="text-xs border-neutral-600 text-neutral-400">
+                              {doc.chunk_count} chunks
+                            </Badge>
+                            {doc.source_type && (
+                              <Badge variant="outline" className="text-xs border-neutral-600 text-neutral-400">
+                                {doc.source_type}
+                              </Badge>
+                            )}
+                            <span className="text-xs text-neutral-500 ml-auto">
+                              {timeAgo(doc.created_at)}
+                            </span>
+                            {selectedDoc?.id === doc.id
+                              ? <ChevronDown className="w-4 h-4 text-neutral-400" />
+                              : <ChevronRight className="w-4 h-4 text-neutral-400" />}
+                          </div>
+                          {doc.source && (
+                            <p className="text-xs text-neutral-500 mb-1 truncate">{doc.source}</p>
+                          )}
+
+                          {/* Expanded: full content + chunks */}
+                          {selectedDoc?.id === doc.id && selectedDoc && (
+                            <div className="mt-3 pt-3 border-t border-neutral-600">
+                              <div className="mb-3">
+                                <p className="text-xs text-neutral-500 mb-1">Full Document:</p>
+                                <div className="text-sm text-neutral-200 max-h-64 overflow-y-auto whitespace-pre-wrap bg-neutral-800 rounded p-2">
+                                  {selectedDoc.content_full}
+                                </div>
+                              </div>
+                              {selectedDoc.chunks.length > 0 && (
+                                <div>
+                                  <p className="text-xs text-neutral-500 mb-1">
+                                    Chunks ({selectedDoc.chunks.length}):
+                                  </p>
+                                  <div className="grid gap-1">
+                                    {selectedDoc.chunks.map((chunk, i) => (
+                                      <div
+                                        key={chunk.id}
+                                        className="text-xs text-neutral-300 bg-neutral-800 rounded p-2"
+                                      >
+                                        <span className="text-neutral-500 mr-2">#{i + 1}</span>
+                                        {truncate(chunk.content, 150)}
+                                      </div>
+                                    ))}
+                                  </div>
+                                </div>
+                              )}
+                            </div>
+                          )}
+                        </CardContent>
+                      </Card>
+                    ))}
+                  </div>
+                )
               ) : activeTab === "recall" ? (
                 recallEntries.length === 0 ? (
                   <div className="text-center text-neutral-500 py-12">No recall entries found.</div>
@@ -215,11 +379,11 @@ export function DocumentLibrary() {
                     ))}
                   </div>
                 )
-              ) : entries.length === 0 ? (
+              ) : visibleEntries.length === 0 && recallEntries.length === 0 ? (
                 <div className="text-center text-neutral-500 py-12">No entries found.</div>
               ) : (
                 <div className="grid gap-2">
-                  {entries.map((entry) => (
+                  {visibleEntries.map((entry) => (
                     <Card
                       key={entry.id}
                       className={`bg-neutral-700 border-neutral-600 cursor-pointer hover:border-neutral-500 transition-colors ${
@@ -262,13 +426,45 @@ export function DocumentLibrary() {
                       </CardContent>
                     </Card>
                   ))}
+                  {/* Recall entries in "All" tab */}
+                  {activeTab === "all" && recallEntries.map((entry) => (
+                    <Card
+                      key={entry.id}
+                      className={`bg-neutral-700 border-neutral-600 cursor-pointer hover:border-neutral-500 transition-colors ${
+                        selectedEntry?.id === entry.id ? "border-neutral-400" : ""
+                      }`}
+                      onClick={() => setSelectedEntry(selectedEntry?.id === entry.id ? null : entry)}
+                    >
+                      <CardContent className="p-3">
+                        <div className="flex items-center gap-2 mb-1">
+                          <MessageSquare className="w-3.5 h-3.5 text-neutral-400" />
+                          <Badge className={`text-xs ${
+                            entry.role === "user" ? "bg-sky-600" : "bg-emerald-600"
+                          }`}>
+                            {entry.role}
+                          </Badge>
+                          <span className="text-xs text-neutral-500">
+                            thread: {entry.thread_id?.slice(0, 8)}
+                          </span>
+                          <span className="text-xs text-neutral-500 ml-auto">
+                            {timeAgo(entry.created_at)}
+                          </span>
+                        </div>
+                        <p className="text-sm text-neutral-200">
+                          {selectedEntry?.id === entry.id
+                            ? entry.content
+                            : truncate(entry.content, 200)}
+                        </p>
+                      </CardContent>
+                    </Card>
+                  ))}
                 </div>
               )}
             </ScrollArea>
           </div>
 
           <div className="text-xs text-neutral-500 mt-1">
-            {total} entries
+            {activeTab === "ingested" ? `${documents.length} documents` : `${total} entries`}
           </div>
         </Tabs>
       </div>

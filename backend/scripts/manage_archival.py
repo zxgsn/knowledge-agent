@@ -10,6 +10,8 @@ Usage:
   python scripts/manage_archival.py cleanup --namespace research --days 30  # Remove entries older than 30 days
   python scripts/manage_archival.py consolidate --namespace research        # Full consolidation
   python scripts/manage_archival.py drop --namespace locomo_baseline       # Delete all entries in namespace
+  python scripts/manage_archival.py smart-dedup -n research       # LLM-assisted dedup (dry run)
+  python scripts/manage_archival.py smart-dedup -n research --apply  # LLM-assisted dedup (execute)
 """
 from __future__ import annotations
 
@@ -343,6 +345,226 @@ def cmd_consolidate(args):
 
 
 # ============================================================
+# Smart Dedup — LLM-assisted duplicate detection
+# ============================================================
+
+BATCH_SIZE = 5
+
+
+def _llm_judge_batch(llm, pairs: list[dict]) -> list[dict]:
+    """Ask LLM to judge multiple candidate pairs at once.
+
+    Args:
+        pairs: list of {"pair_id": int, "a": str, "b": str}
+
+    Returns list of {"pair_id": int, "duplicate": bool, "reason": str, "merged": str|None}
+    """
+    pair_blocks = []
+    for p in pairs:
+        pair_blocks.append(
+            f"### Pair {p['pair_id']}\n"
+            f"**Entry A:**\n{p['a']}\n\n"
+            f"**Entry B:**\n{p['b']}"
+        )
+
+    prompt = (
+        "You are a knowledge base curator. For each pair below, judge whether the two entries are "
+        "**true duplicates** (same fact/info, redundant) or **distinct** "
+        "(different facts, different angles, complementary).\n\n"
+        "Respond with a JSON array, one object per pair:\n"
+        '[{"pair_id": 0, "duplicate": true/false, "reason": "<brief>", '
+        '"merged": "<merged text if duplicate, null otherwise>"}, ...]\n\n'
+        + "\n\n".join(pair_blocks)
+    )
+
+    try:
+        resp = llm.invoke(prompt)
+        text = resp.content.strip()
+        if "```" in text:
+            text = text.split("```")[1]
+            if text.startswith("json"):
+                text = text[4:]
+            text = text.strip()
+        parsed = json.loads(text)
+        if isinstance(parsed, list):
+            return parsed
+        return []
+    except Exception as e:
+        return [{"pair_id": p["pair_id"], "duplicate": False, "reason": f"LLM error: {e}", "merged": None} for p in pairs]
+
+
+def cmd_smart_dedup(args):
+    """Smart deduplication: cosine candidates + LLM judgment."""
+    namespace = args.namespace
+    threshold = args.threshold
+    apply = args.apply
+
+    # Init LLM
+    from langchain_openai import ChatOpenAI
+    llm = ChatOpenAI(
+        model=os.getenv("LLM_MODEL", "gpt-4o-mini"),
+        base_url=os.getenv("LLM_BASE_URL", "https://api.openai.com/v1"),
+        api_key=os.getenv("LLM_API_KEY", ""),
+        temperature=0,
+    )
+
+    conn = get_conn()
+    rows = conn.execute(
+        "SELECT id, content, embedding FROM archival_memory WHERE namespace = %s",
+        (namespace,),
+    ).fetchall()
+
+    if len(rows) < 2:
+        print(f"  Only {len(rows)} entries in '{namespace}', nothing to check.")
+        conn.close()
+        return
+
+    print(f"  Scanning {len(rows)} entries for candidates (cosine >= {threshold})...")
+
+    # Find candidate pairs
+    candidates = []
+    for i in range(len(rows)):
+        for j in range(i + 1, len(rows)):
+            vec_i = rows[i][2]
+            vec_j = rows[j][2]
+            if isinstance(vec_i, str):
+                vec_i = json.loads(vec_i)
+            if isinstance(vec_j, str):
+                vec_j = json.loads(vec_j)
+            dot = sum(a * b for a, b in zip(vec_i, vec_j))
+            norm_i = sum(a * a for a in vec_i) ** 0.5
+            norm_j = sum(b * b for b in vec_j) ** 0.5
+            sim = dot / (norm_i * norm_j) if norm_i > 0 and norm_j > 0 else 0
+            if sim >= threshold:
+                candidates.append((i, j, sim))
+
+    if not candidates:
+        print(f"  No candidate pairs found above threshold {threshold}.")
+        conn.close()
+        return
+
+    # Sort by similarity descending
+    candidates.sort(key=lambda x: x[2], reverse=True)
+
+    # High-confidence auto-duplicates (cosine >= 0.95 skip LLM)
+    AUTO_DUP_THRESHOLD = 0.95
+    auto_dups = [(i, j, sim) for i, j, sim in candidates if sim >= AUTO_DUP_THRESHOLD]
+    llm_candidates = [(i, j, sim) for i, j, sim in candidates if sim < AUTO_DUP_THRESHOLD]
+
+    print(f"  Found {len(candidates)} candidate pairs.")
+    print(f"  Auto-duplicate (cosine >= {AUTO_DUP_THRESHOLD}): {len(auto_dups)}")
+    print(f"  LLM judgment needed: {len(llm_candidates)}")
+
+    results = []
+
+    # Auto-duplicates: no LLM needed
+    for i, j, sim in auto_dups:
+        results.append({
+            "idx_a": i, "idx_b": j,
+            "id_a": rows[i][0], "id_b": rows[j][0],
+            "cosine": sim,
+            "duplicate": True,
+            "reason": f"auto (cosine={sim:.3f} >= {AUTO_DUP_THRESHOLD})",
+            "merged": None,
+        })
+
+    # Batched LLM judgment
+    if llm_candidates:
+        batches = []
+        for k in range(0, len(llm_candidates), BATCH_SIZE):
+            batch = []
+            for idx, (i, j, sim) in enumerate(llm_candidates[k:k + BATCH_SIZE], start=k):
+                batch.append({"pair_id": idx, "a": rows[i][1], "b": rows[j][1]})
+            batches.append(batch)
+
+        print(f"  Judging in {len(batches)} batches (batch_size={BATCH_SIZE})...\n")
+
+        for batch in tqdm(batches, desc="  Judging"):
+            judgments = _llm_judge_batch(llm, batch)
+            j_map = {j["pair_id"]: j for j in judgments}
+            for p in batch:
+                pid = p["pair_id"]
+                i, j, sim = llm_candidates[pid]
+                judgment = j_map.get(pid, {})
+                results.append({
+                    "idx_a": i, "idx_b": j,
+                    "id_a": rows[i][0], "id_b": rows[j][0],
+                    "cosine": sim,
+                    "duplicate": judgment.get("duplicate", False),
+                    "reason": judgment.get("reason", ""),
+                    "merged": judgment.get("merged"),
+                })
+
+    # Display results
+    confirmed = [r for r in results if r["duplicate"]]
+    rejected = [r for r in results if not r["duplicate"]]
+
+    print(f"\n  === Results ===")
+    print(f"  Confirmed duplicates: {len(confirmed)}")
+    print(f"  Rejected (distinct):  {len(rejected)}")
+
+    if confirmed:
+        print(f"\n  --- Confirmed Duplicates ---")
+        for r in confirmed:
+            preview_a = rows[r["idx_a"]][1][:60].replace("\n", " ")
+            preview_b = rows[r["idx_b"]][1][:60].replace("\n", " ")
+            print(f"  [cosine={r['cosine']:.3f}] {r['reason']}")
+            print(f"    A: {preview_a}...")
+            print(f"    B: {preview_b}...")
+            print()
+
+    if rejected:
+        print(f"  --- Rejected (Distinct) ---")
+        for r in rejected:
+            preview_a = rows[r["idx_a"]][1][:60].replace("\n", " ")
+            preview_b = rows[r["idx_b"]][1][:60].replace("\n", " ")
+            print(f"  [cosine={r['cosine']:.3f}] {r['reason']}")
+            print(f"    A: {preview_a}...")
+            print(f"    B: {preview_b}...")
+            print()
+
+    if not apply:
+        print("  Dry run. Use --apply to merge confirmed duplicates.")
+        conn.close()
+        return
+
+    # Merge confirmed duplicates
+    if not confirmed:
+        conn.close()
+        return
+
+    embeddings = get_embeddings()
+    merged_count = 0
+    deleted_count = 0
+
+    # Track which entries have already been merged/deleted
+    deleted_ids = set()
+
+    for r in tqdm(confirmed, desc="  Merging"):
+        id_a, id_b = r["id_a"], r["id_b"]
+        if id_a in deleted_ids or id_b in deleted_ids:
+            continue
+
+        merged_text = r.get("merged")
+        if not merged_text:
+            merged_text = max(rows[r["idx_a"]][1], rows[r["idx_b"]][1], key=len)
+
+        merged_vec = Vector(embeddings.embed_query(merged_text))
+        conn.execute(
+            "UPDATE archival_memory SET content = %s, embedding = %s WHERE id = %s",
+            (merged_text, merged_vec, id_a),
+        )
+        conn.execute("DELETE FROM archival_memory WHERE id = %s", (id_b,))
+        deleted_ids.add(id_b)
+        merged_count += 1
+        deleted_count += 1
+
+    conn.commit()
+    conn.close()
+    print(f"  Merged {merged_count} pairs, deleted {deleted_count} entries.")
+
+
+# ============================================================
 # Main
 # ============================================================
 
@@ -382,6 +604,14 @@ if __name__ == "__main__":
     p_con.add_argument("--namespace", "-n", required=True)
     p_con.add_argument("--threshold", "-t", type=float, default=0.85)
 
+    # smart-dedup
+    p_smart = sub.add_parser("smart-dedup", help="LLM-assisted duplicate detection")
+    p_smart.add_argument("--namespace", "-n", required=True)
+    p_smart.add_argument("--threshold", "-t", type=float, default=0.7,
+                         help="Cosine similarity threshold for candidates (default 0.7)")
+    p_smart.add_argument("--apply", action="store_true",
+                         help="Execute merges (default is dry run)")
+
     args = parser.parse_args()
 
     if not args.command:
@@ -389,4 +619,5 @@ if __name__ == "__main__":
         sys.exit(1)
 
     {"stats": cmd_stats, "list": cmd_list, "dedup": cmd_dedup,
-     "cleanup": cmd_cleanup, "drop": cmd_drop, "consolidate": cmd_consolidate}[args.command](args)
+     "cleanup": cmd_cleanup, "drop": cmd_drop, "consolidate": cmd_consolidate,
+     "smart-dedup": cmd_smart_dedup}[args.command](args)

@@ -9,7 +9,7 @@ A personal knowledge agent with persistent memory, built on LangGraph. It can re
 ## Features
 
 - **Three-Tier Memory System** — Core Memory (always in context), Archival Memory (vector long-term storage), Recall Memory (conversation history)
-- **Hybrid Search** — Archival retrieval combines vector similarity (DashScope embeddings) with BM25 keyword matching (PostgreSQL tsvector + GIN index) for better recall
+- **Hybrid Search + Re-ranking** — Archival retrieval combines vector similarity (DashScope embeddings) with BM25 keyword matching (PostgreSQL tsvector + GIN index), followed by cross-encoder re-ranking (`BAAI/bge-reranker-v2-m3`) for improved result ordering
 - **Core Memory Auto-Compression** — Blocks approaching their character limit are automatically distilled by the LLM, preserving key facts while staying within bounds
 - **Deep Research** — Multi-loop web search with automatic gap analysis and follow-up queries
 - **Document Ingestion** — Import URLs, PDFs, or plain text; automatic chunking and vectorization
@@ -17,6 +17,9 @@ A personal knowledge agent with persistent memory, built on LangGraph. It can re
 - **Chat with Knowledge Retrieval** — Chat mode automatically searches Archival Memory for relevant context before generating a response
 - **Persistent Knowledge** — Research findings are stored in PostgreSQL + pgvector and survive across sessions
 - **Memory Pipeline (mem0-style)** — Automatic fact extraction, cosine dedup, conflict resolution, and consolidation after every conversation turn
+- **Document Library** — Full document storage (documents table) separate from chunked retrieval index, with document-level browsing and dedup
+- **Conversation History Sidebar** — Left panel for switching between past conversation threads
+- **Smart Deduplication** — LLM-assisted batch dedup for archival memory with cosine similarity candidate filtering
 - **Full-Stack UI** — React frontend with real-time agent activity visualization
 
 ## Architecture
@@ -41,7 +44,7 @@ A personal knowledge agent with persistent memory, built on LangGraph. It can re
 
 - **Core Memory** — Editable blocks injected into the system prompt every turn. The agent can self-edit them. Blocks approaching their character limit (≥80%) are automatically compressed by the LLM to stay within bounds.
 - **Archival Memory** — Long-term semantic storage in PostgreSQL + pgvector. Research findings and ingested documents are stored as 1024-dim embeddings. Retrieval uses hybrid search: vector cosine similarity (70% weight) combined with BM25 keyword matching (30% weight) via PostgreSQL `tsvector` + GIN index.
-- **Recall Memory** — Conversation history with semantic search (table structure ready, integration pending).
+- **Recall Memory** — Conversation history with semantic search via pgvector. Automatically populated after each turn and queried during recall_memory for cross-session context.
 
 ### Agent Graph
 
@@ -69,9 +72,11 @@ ingest_document node
   ↓
 chunk_text() — paragraph → sentence → character splitting with overlap
   ↓
+Documents table (full text) + ArchivalMemory (chunks with document_id)
+  ↓
 DashScope Embedding batch vectorization
   ↓
-ArchivalMemory.put_batch() → PostgreSQL + pgvector
+PostgreSQL + pgvector (dedup via UNIQUE INDEX on title+source)
 ```
 
 ## Tech Stack
@@ -267,6 +272,10 @@ python scripts/manage_archival.py cleanup --namespace research --days 30
 # Full consolidation (dedup + merge via LLM)
 python scripts/manage_archival.py consolidate --namespace research
 
+# Smart dedup (cosine candidates + batched LLM judgment)
+python scripts/manage_archival.py smart-dedup --namespace research --dry-run
+python scripts/manage_archival.py smart-dedup --namespace research
+
 # Delete all entries in a namespace
 python scripts/manage_archival.py drop --namespace locomo_baseline --dry-run
 python scripts/manage_archival.py drop --namespace locomo_baseline
@@ -298,8 +307,9 @@ knowledge-agent/
 │       │   └── tools.py              # Memory edit + archival tools
 │       ├── storage/
 │       │   ├── embedding.py          # DashScope embedding wrapper
-│       │   ├── archival.py           # ArchivalMemory (pgvector)
+│       │   ├── archival.py           # ArchivalMemory (pgvector) + documents table
 │       │   ├── recall.py             # RecallMemory
+│       │   ├── reranker.py           # Cross-encoder re-ranking (BAAI/bge-reranker-v2-m3)
 │       │   └── ingestion.py          # Document ingestion pipeline
 │       └── nodes/
 │           ├── memory_manager.py     # Intent routing + archival save
@@ -308,11 +318,13 @@ knowledge-agent/
 │           └── responder.py          # Response generation
 └── frontend/
     └── src/
-        ├── App.tsx                   # Main app with LangGraph streaming
+        ├── App.tsx                   # Main app with LangGraph streaming + thread management
         └── components/
             ├── InputForm.tsx         # Mode selector (Chat/Research/Memory/Ingest)
             ├── WelcomeScreen.tsx
             ├── ChatMessagesView.tsx
+            ├── DocumentLibrary.tsx   # Knowledge base browser (documents + archival entries)
+            ├── ThreadSidebar.tsx     # Conversation history sidebar
             └── ActivityTimeline.tsx
 ```
 
@@ -327,13 +339,14 @@ knowledge-agent/
 
 ## Roadmap
 
-- [ ] **Document Library Output** — Structured knowledge base visualization with document collections, similar to Feishu/Lark document libraries. Support organizing archived knowledge into browsable, categorized collections with metadata, tags, and search.
+- [x] **Cross-encoder Re-ranking** — Added `BAAI/bge-reranker-v2-m3` re-ranking stage after hybrid retrieval, with automatic fallback to cosine-only ordering when the model is unavailable.
+- [x] **Recall Memory Integration** — Conversation history stored in recall_memory with semantic search, displayed in Document Library's Recall tab, and included in hybrid archival retrieval.
+- [x] **Document Library Output** — Full document storage (documents table) with document-level browsing, namespace filtering, and dedup via unique index. Ingested documents show title, chunk count, and expandable full content.
+- [x] **Conversation History Sidebar** — Left panel with thread listing via LangGraph SDK, supporting thread switching and new chat creation.
+- [x] **Smart Deduplication** — `manage_archival.py smart-dedup` command: cosine similarity candidate filtering (≥0.85) with batched LLM judgment (5 pairs/call) and auto-merge for high-confidence duplicates (≥0.95).
 - [ ] **Feishu Integration** — Direct integration with Feishu (Lark) for bidirectional sync: ingest Feishu docs into the knowledge base, and export agent findings back to Feishu documents.
-- [ ] **Cross-encoder Re-ranking** — Add a re-ranking stage (e.g. `BAAI/bge-reranker-v2-m3`) after hybrid retrieval to improve result ordering.
-- [ ] **Recall Memory Integration** — Use conversation history in recall_memory to provide long-term conversational context across sessions.
 - [ ] **Improved Text Chunking** — Current chunking uses paragraph-first splitting with fixed size (800 chars) and character-level overlap. Issues: no semantic boundary awareness, poor handling of tables/lists/code blocks, fixed chunk size ignores content structure. Explore semantic chunking (e.g. embedding-based boundary detection) or agentic chunking (LLM-guided splitting) for better retrieval quality.
 - [ ] **Memory Pipeline Optimization** — Current mem0-style pipeline (extract → dedup → upsert) runs after every response turn, adding latency. Fact extraction quality depends heavily on LLM capability; dedup uses a fixed cosine threshold (0.8) which may miss near-duplicates or over-merge distinct facts. Explore: batched/async pipeline execution, adaptive dedup thresholds, fact confidence scoring, and conflict resolution strategies beyond simple merge/skip.
-- [ ] **Auto-organize Document Deduplication** — Build an agent that periodically scans archival memory for duplicate or overlapping content across ingested documents, research summaries, and conversation facts. Use embedding clustering + LLM judgment to detect redundancy, merge overlapping entries, and maintain a clean, well-organized knowledge base without manual intervention.
 
 ## Acknowledgments
 
