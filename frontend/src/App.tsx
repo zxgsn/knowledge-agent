@@ -73,10 +73,66 @@ export default function App() {
           title: isSufficient ? "Memory Sufficient" : "Memory Insufficient — Searching Web",
           data: reason,
         };
+      } else if (event.memory_pipeline) {
+        const memOps = event.memory_pipeline?.memory_operations;
+        const extractOp = Array.isArray(memOps) ? memOps.find((op: any) => op.type === "pipeline_extract") : null;
+        if (extractOp) {
+          const extracted = extractOp.facts_extracted ?? 0;
+          const stored = extractOp.stored ?? 0;
+          const updated = extractOp.updated ?? 0;
+          const skipped = extractOp.skipped ?? 0;
+          if (extracted > 0) {
+            const parts = [];
+            if (stored > 0) parts.push(`${stored} stored`);
+            if (updated > 0) parts.push(`${updated} updated`);
+            if (skipped > 0) parts.push(`${skipped} skipped`);
+            processedEvent = {
+              title: "Memory Pipeline",
+              data: `Extracted ${extracted} facts: ${parts.join(", ")}`,
+            };
+          }
+        }
       } else if (event.save_to_archival) {
+        const memOps = event.save_to_archival?.memory_operations;
+        const saveOp = Array.isArray(memOps) ? memOps.find((op: any) => op.type === "save") : null;
+        const topic = saveOp?.topic || "";
+        const preview = saveOp?.content_preview || "";
         processedEvent = {
-          title: "Saving to Memory",
-          data: "Storing findings in long-term memory...",
+          title: "Saved to Archival Memory",
+          data: topic ? `Topic: ${topic}\n${preview}` : preview || "Storing findings in long-term memory...",
+        };
+      } else if (event.consolidate_memory) {
+        const memOps = event.consolidate_memory?.memory_operations;
+        if (Array.isArray(memOps)) {
+          for (const op of memOps) {
+            if (op.type === "consolidate") {
+              const ns = op.namespace || "?";
+              const merged = op.merged ?? 0;
+              const deleted = op.deleted ?? 0;
+              if (merged > 0 || deleted > 0) {
+                processedEvent = {
+                  title: "Memory Consolidated",
+                  data: `[${ns}] ${merged} groups merged, ${deleted} duplicates removed`,
+                };
+              }
+            } else if (op.type === "cleanup") {
+              const ns = op.namespace || "?";
+              const expired = op.expired_deleted ?? 0;
+              const excess = op.excess_deleted ?? 0;
+              if (expired > 0 || excess > 0) {
+                processedEvent = {
+                  title: "Memory Cleanup",
+                  data: `[${ns}] ${expired} expired, ${excess} excess entries removed`,
+                };
+              }
+            }
+          }
+        }
+      } else if (event.ingest_document) {
+        const ingestResult = event.ingest_document?.ingest_result;
+        processedEvent = {
+          title: "Document Ingested",
+          data: ingestResult || "Document stored in archival memory.",
         };
       } else if (event.respond) {
         processedEvent = {

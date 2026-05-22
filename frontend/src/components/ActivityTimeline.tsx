@@ -53,6 +53,10 @@ export function ActivityTimeline({
       return <Database className="h-4 w-4 text-emerald-400" />;
     } else if (title.toLowerCase().includes("memory insufficient")) {
       return <Database className="h-4 w-4 text-yellow-400" />;
+    } else if (title.toLowerCase().includes("memory pipeline") || title.toLowerCase().includes("memory consolidated") || title.toLowerCase().includes("memory cleanup")) {
+      return <Database className="h-4 w-4 text-cyan-400" />;
+    } else if (title.toLowerCase().includes("saved to archival") || title.toLowerCase().includes("document ingested")) {
+      return <Database className="h-4 w-4 text-emerald-400" />;
     } else if (title.toLowerCase().includes("saving") || title.toLowerCase().includes("memory")) {
       return <Database className="h-4 w-4 text-emerald-400" />;
     } else if (title.toLowerCase().includes("intent")) {
