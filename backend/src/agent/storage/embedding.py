@@ -39,10 +39,9 @@ class DashScopeEmbeddings(Embeddings):
 
     def embed_documents(self, texts: list[str]) -> list[list[float]]:
         """Embed a list of documents. Handles batching if needed."""
-        # DashScope supports batch embedding, but with limits
-        # Process in chunks of 25 to be safe
+        # DashScope batch limit is 10 per request
         all_embeddings: list[list[float]] = []
-        chunk_size = 25
+        chunk_size = 10
         for i in range(0, len(texts), chunk_size):
             chunk = texts[i : i + chunk_size]
             all_embeddings.extend(self._call_api(chunk))

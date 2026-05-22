@@ -49,9 +49,29 @@ export default function App() {
           data: event.reflection?.knowledge_gap || "Analyzing research results",
         };
       } else if (event.recall_memory) {
+        const memOps = event.recall_memory?.memory_operations;
+        const recallOp = Array.isArray(memOps) ? memOps.find((op: any) => op.type === "recall") : null;
+        const resultCount = recallOp?.result_count ?? 0;
+        const archivalResults = event.recall_memory?.archival_results ?? [];
+        const previews = archivalResults
+          .slice(0, 3)
+          .map((r: any) => {
+            const content = r.content || "";
+            const preview = content.length > 60 ? content.slice(0, 60) + "..." : content;
+            return `[${r.source || "archival"}] ${preview} (${(r.score ?? 0).toFixed(2)})`;
+          });
         processedEvent = {
-          title: "Searching Knowledge Base",
-          data: "Searching archival memory for relevant context...",
+          title: resultCount > 0 ? `Memory Retrieved (${resultCount} results)` : "Memory Search (no results)",
+          data: previews.length > 0 ? previews.join("\n") : "No relevant memories found.",
+        };
+      } else if (event.evaluate_recall) {
+        const memOps = event.evaluate_recall?.memory_operations;
+        const evalOp = Array.isArray(memOps) ? memOps.find((op: any) => op.type === "evaluate") : null;
+        const isSufficient = evalOp?.is_sufficient ?? false;
+        const reason = evalOp?.reason || "Evaluating...";
+        processedEvent = {
+          title: isSufficient ? "Memory Sufficient" : "Memory Insufficient — Searching Web",
+          data: reason,
         };
       } else if (event.save_to_archival) {
         processedEvent = {

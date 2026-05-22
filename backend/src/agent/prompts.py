@@ -163,3 +163,19 @@ Entries:
 
 Respond with ONLY the merged fact text (no JSON, no explanation).
 """
+
+EVALUATE_RECALL_PROMPT = """Evaluate whether the retrieved memory content is sufficient to answer the user's question.
+
+User question: {question}
+
+Retrieved from memory:
+{memory_content}
+
+Determine:
+1. Does the memory content contain information relevant to the question?
+2. Is the information sufficient to provide a complete, accurate answer?
+3. If partially sufficient, what specific information is missing?
+
+Respond with ONLY a JSON object:
+{{"is_sufficient": true/false, "confidence": "high|medium|low", "reason": "..."}}
+"""

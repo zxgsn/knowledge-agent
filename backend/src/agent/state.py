@@ -35,5 +35,9 @@ class AgentState(TypedDict):
     turn_count: int
     pipeline_facts: list[dict]
 
+    # --- Memory Evaluation ---
+    memory_sufficient: bool      # 记忆评估结果：是否足够回答问题
+    memory_evaluation: str       # 评估理由
+
     # --- Memory Operations Log ---
     memory_operations: Annotated[list, operator.add]  # 记忆操作日志

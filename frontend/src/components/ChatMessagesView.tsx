@@ -1,7 +1,7 @@
 import type React from "react";
 import type { Message } from "@langchain/langgraph-sdk";
 import { ScrollArea } from "@/components/ui/scroll-area";
-import { Loader2, Copy, CopyCheck } from "lucide-react";
+import { Loader2, Copy, CopyCheck, BookMarked } from "lucide-react";
 import { InputForm } from "@/components/InputForm";
 import { Button } from "@/components/ui/button";
 import { useState, ReactNode } from "react";
@@ -158,6 +158,30 @@ const HumanMessageBubble: React.FC<HumanMessageBubbleProps> = ({
   );
 };
 
+// Extract memory indicator section from message content
+function extractMemorySection(content: string): { main: string; memory: string | null } {
+  const marker = "\n\n---\n> ";
+  const idx = content.indexOf(marker);
+  if (idx === -1) return { main: content, memory: null };
+  return {
+    main: content.slice(0, idx),
+    memory: content.slice(idx + marker.length).replace(/^> /gm, ""),
+  };
+}
+
+// Memory indicator badge component
+const MemoryBadge: React.FC<{ memoryText: string }> = ({ memoryText }) => (
+  <div className="mt-3 rounded-lg border border-emerald-700/50 bg-emerald-950/30 px-3 py-2">
+    <div className="flex items-center gap-2 text-emerald-400 text-xs font-medium mb-1">
+      <BookMarked className="h-3.5 w-3.5" />
+      <span>Memory Retrieved</span>
+    </div>
+    <div className="text-xs text-emerald-300/80 whitespace-pre-line leading-relaxed">
+      {memoryText}
+    </div>
+  </div>
+);
+
 // Props for AiMessageBubble
 interface AiMessageBubbleProps {
   message: Message;
@@ -186,6 +210,11 @@ const AiMessageBubble: React.FC<AiMessageBubbleProps> = ({
     isLastMessage && isOverallLoading ? liveActivity : historicalActivity;
   const isLiveActivityForThisBubble = isLastMessage && isOverallLoading;
 
+  const rawContent = typeof message.content === "string"
+    ? message.content
+    : JSON.stringify(message.content);
+  const { main: mainContent, memory: memoryText } = extractMemorySection(rawContent);
+
   return (
     <div className={`relative break-words flex flex-col`}>
       {activityForThisBubble && activityForThisBubble.length > 0 && (
@@ -197,10 +226,9 @@ const AiMessageBubble: React.FC<AiMessageBubbleProps> = ({
         </div>
       )}
       <ReactMarkdown components={mdComponents}>
-        {typeof message.content === "string"
-          ? message.content
-          : JSON.stringify(message.content)}
+        {mainContent}
       </ReactMarkdown>
+      {memoryText && <MemoryBadge memoryText={memoryText} />}
       <Button
         variant="default"
         className={`cursor-pointer bg-neutral-700 border-neutral-600 text-neutral-300 self-end ${

@@ -161,6 +161,9 @@ class ArchivalMemory:
     ) -> list[dict]:
         """Hybrid search: vector similarity + BM25 keyword match.
 
+        Uses websearch_to_tsquery (OR logic) for BM25 and normalizes
+        ts_rank to [0,1] so it's on the same scale as cosine similarity.
+
         Args:
             query: Search query.
             namespace: Namespace to search in.
@@ -175,14 +178,13 @@ class ArchivalMemory:
         sql = """
             SELECT id, content, metadata,
                    %s * (1 - (embedding <=> %s::vector))
-                     + (1 - %s) * ts_rank(content_tsv, plainto_tsquery('simple', %s))
+                     + (1 - %s) * LEAST(1, ts_rank(content_tsv, plainto_tsquery('english', %s)) * 5)
                    AS score
             FROM archival_memory
             WHERE namespace = %s
-              AND (content_tsv @@ plainto_tsquery('simple', %s)
-                   OR 1 - (embedding <=> %s::vector) > 0.2)
+              AND 1 - (embedding <=> %s::vector) > 0.15
         """
-        params: list = [alpha, query_embedding, alpha, query, namespace, query, query_embedding]
+        params: list = [alpha, query_embedding, alpha, query, namespace, query_embedding]
 
         if metadata_filter:
             for key, value in metadata_filter.items():

@@ -13,7 +13,7 @@ from langchain_core.runnables import RunnableConfig
 from langchain_openai import ChatOpenAI
 
 from agent.configuration import Configuration
-from agent.prompts import ARCHIVAL_STORE_PROMPT, ROUTE_INTENT_PROMPT
+from agent.prompts import ARCHIVAL_STORE_PROMPT, EVALUATE_RECALL_PROMPT, ROUTE_INTENT_PROMPT
 from agent.state import AgentState
 
 
@@ -185,6 +185,76 @@ async def recall_memory(state: AgentState, config: RunnableConfig) -> dict:
             }
             for r in results
         ],
+        "memory_operations": memory_ops,
+    }
+
+
+async def evaluate_recall(state: AgentState, config: RunnableConfig) -> dict:
+    """Evaluate whether retrieved memory is sufficient to answer the user's question.
+
+    Routes to respond (memory sufficient) or generate_query (needs web research).
+    """
+    from datetime import datetime, timezone
+
+    configurable = Configuration.from_runnable_config(config)
+
+    user_msg = ""
+    for msg in reversed(state["messages"]):
+        if isinstance(msg, HumanMessage):
+            user_msg = msg.content
+            break
+
+    archival_results = state.get("archival_results", [])
+
+    # No memory results at all — insufficient
+    if not archival_results:
+        memory_ops = [{
+            "type": "evaluate",
+            "is_sufficient": False,
+            "reason": "No relevant memories found.",
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        }]
+        return {"memory_sufficient": False, "memory_evaluation": "No relevant memories found.", "memory_operations": memory_ops}
+
+    # Format memory content for evaluation
+    memory_content = "\n".join(
+        f"- [{r.get('source', 'archival')}] {r['content']} (score: {r.get('score', 0):.2f})"
+        for r in archival_results
+    )
+
+    # Ask LLM to evaluate
+    llm = ChatOpenAI(
+        model=configurable.llm_model,
+        base_url=configurable.llm_base_url,
+        api_key=configurable.llm_api_key,
+        temperature=0,
+        http_async_client=httpx.AsyncClient(proxy=None),
+    )
+
+    prompt = EVALUATE_RECALL_PROMPT.format(
+        question=user_msg,
+        memory_content=memory_content,
+    )
+
+    try:
+        response = await llm.ainvoke(prompt)
+        parsed = _parse_json(response.content)
+        is_sufficient = parsed.get("is_sufficient", False)
+        reason = parsed.get("reason", "Evaluation completed.")
+    except Exception:
+        is_sufficient = False
+        reason = "Failed to evaluate memory content."
+
+    memory_ops = [{
+        "type": "evaluate",
+        "is_sufficient": is_sufficient,
+        "reason": reason,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    }]
+
+    return {
+        "memory_sufficient": is_sufficient,
+        "memory_evaluation": reason,
         "memory_operations": memory_ops,
     }
 

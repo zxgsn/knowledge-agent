@@ -123,8 +123,18 @@ async def respond(state: AgentState, config: RunnableConfig) -> dict:
     except Exception as e:
         print(f"[responder] Failed to save to recall: {e}", file=sys.stderr)
 
+    # Add memory indicator when archival results were used
+    response_text = response.content
+    archival_used = [r for r in state.get("archival_results", []) if r.get("score", 0) >= 0.3]
+    if archival_used:
+        indicator = f"\n\n---\n> 📚 **从记忆中检索到 {len(archival_used)} 条相关内容**"
+        for r in archival_used[:3]:
+            preview = r["content"][:60] + ("..." if len(r["content"]) > 60 else "")
+            indicator += f"\n> - [{r.get('source', 'archival')}] {preview} (score: {r['score']:.2f})"
+        response_text += indicator
+
     result = {
-        "messages": [AIMessage(content=response.content)],
+        "messages": [AIMessage(content=response_text)],
         "core_memory": core_memory.to_dict(),
     }
     return result

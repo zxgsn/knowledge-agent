@@ -31,3 +31,7 @@ frontend/dist/
 # OS
 .DS_Store
 Thumbs.db
+
+# Data & docs (not tracked)
+backend/data/locomo.json
+docs/

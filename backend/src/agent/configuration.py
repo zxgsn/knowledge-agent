@@ -42,6 +42,14 @@ class Configuration(BaseModel):
         default=0.8,
         metadata={"description": "Cosine similarity threshold for fact deduplication."},
     )
+    archival_cleanup_days: int = Field(
+        default=30,
+        metadata={"description": "Days before ingested entries are eligible for cleanup."},
+    )
+    archival_max_entries: int = Field(
+        default=1000,
+        metadata={"description": "Max entries per namespace before forced cleanup."},
+    )
 
     @classmethod
     def from_runnable_config(

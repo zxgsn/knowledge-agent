@@ -95,8 +95,8 @@ def _sync_search_archival_for_dedup(
     return results
 
 
-def _sync_put_fact_to_archival(content: str, metadata: dict) -> str:
-    """Store a new fact in archival memory under conversation_facts namespace."""
+def _sync_put_fact_to_archival(content: str, metadata: dict, namespace: str = "conversation_facts") -> str:
+    """Store a new fact in archival memory."""
     import psycopg
     from pgvector import Vector
     from pgvector.psycopg import register_vector
@@ -105,7 +105,6 @@ def _sync_put_fact_to_archival(content: str, metadata: dict) -> str:
     embeddings = get_embeddings()
     entry_id = str(uuid.uuid4())
     metadata["timestamp"] = datetime.now(timezone.utc).isoformat()
-    metadata["type"] = "extracted_fact"
     embedding = Vector(embeddings.embed_query(content))
 
     conn = psycopg.connect(get_db_url(), connect_timeout=5)
@@ -113,7 +112,7 @@ def _sync_put_fact_to_archival(content: str, metadata: dict) -> str:
     conn.execute(
         "INSERT INTO archival_memory (id, namespace, content, metadata, embedding) "
         "VALUES (%s, %s, %s, %s, %s) ON CONFLICT (id) DO NOTHING",
-        (entry_id, "conversation_facts", content, json.dumps(metadata), embedding),
+        (entry_id, namespace, content, json.dumps(metadata), embedding),
     )
     conn.commit()
     conn.close()
@@ -287,24 +286,70 @@ async def memory_pipeline(state: AgentState, config: RunnableConfig) -> dict:
     }
 
 
-async def consolidate_memory(state: AgentState, config: RunnableConfig) -> dict:
-    """Periodic consolidation: dedup and merge similar facts via embedding clustering."""
-    configurable = Configuration.from_runnable_config(config)
+def _sync_cleanup_namespace(namespace: str, max_age_days: int) -> int:
+    """Delete entries older than max_age_days from a namespace. Returns count deleted."""
+    import psycopg
+    from agent.storage import get_db_url
 
-    facts = await asyncio.to_thread(_sync_get_all_facts, "conversation_facts", 500)
+    try:
+        conn = psycopg.connect(get_db_url(), connect_timeout=5)
+    except Exception:
+        return 0
+
+    result = conn.execute(
+        "DELETE FROM archival_memory WHERE namespace = %s "
+        "AND created_at < NOW() - INTERVAL '%s days'",
+        (namespace, max_age_days),
+    )
+    conn.commit()
+    deleted = result.rowcount
+    conn.close()
+    return deleted
+
+
+def _sync_cleanup_excess(namespace: str, max_entries: int) -> int:
+    """Keep only the newest max_entries in a namespace. Returns count deleted."""
+    import psycopg
+    from agent.storage import get_db_url
+
+    try:
+        conn = psycopg.connect(get_db_url(), connect_timeout=5)
+    except Exception:
+        return 0
+
+    count = conn.execute(
+        "SELECT COUNT(*) FROM archival_memory WHERE namespace = %s", (namespace,)
+    ).fetchone()[0]
+
+    if count <= max_entries:
+        conn.close()
+        return 0
+
+    conn.execute(
+        "DELETE FROM archival_memory WHERE id IN ("
+        "  SELECT id FROM archival_memory WHERE namespace = %s "
+        "  ORDER BY created_at ASC LIMIT %s"
+        ")",
+        (namespace, count - max_entries),
+    )
+    conn.commit()
+    deleted = count - max_entries
+    conn.close()
+    return deleted
+
+
+async def _consolidate_namespace(
+    namespace: str,
+    llm,
+    threshold: float = 0.85,
+    max_entries: int = 500,
+) -> dict:
+    """Dedup and merge similar entries in a namespace via embedding clustering."""
+    facts = await asyncio.to_thread(_sync_get_all_facts, namespace, max_entries)
 
     if len(facts) < 2:
-        return {
-            "memory_operations": [{
-                "type": "consolidate",
-                "action": "skipped",
-                "reason": "too_few_facts",
-                "count": len(facts),
-                "timestamp": datetime.now(timezone.utc).isoformat(),
-            }],
-        }
+        return {"namespace": namespace, "action": "skipped", "reason": "too_few", "count": len(facts)}
 
-    # Parse stored embeddings (avoid re-embedding)
     import numpy as np
 
     def parse_vector(text: str) -> list[float]:
@@ -314,22 +359,13 @@ async def consolidate_memory(state: AgentState, config: RunnableConfig) -> dict:
         embeddings = [parse_vector(f["embedding_text"]) for f in facts]
         emb_matrix = np.array(embeddings)
     except Exception:
-        return {
-            "memory_operations": [{
-                "type": "consolidate",
-                "action": "skipped",
-                "reason": "embedding_parse_error",
-                "timestamp": datetime.now(timezone.utc).isoformat(),
-            }],
-        }
+        return {"namespace": namespace, "action": "skipped", "reason": "embedding_error"}
 
-    # Normalize and compute pairwise cosine similarity
     norms = np.linalg.norm(emb_matrix, axis=1, keepdims=True)
     norms = np.where(norms == 0, 1, norms)
     emb_normed = emb_matrix / norms
     sim_matrix = emb_normed @ emb_normed.T
 
-    # Union-Find clustering
     n = len(facts)
     parent = list(range(n))
 
@@ -344,22 +380,18 @@ async def consolidate_memory(state: AgentState, config: RunnableConfig) -> dict:
         if px != py:
             parent[px] = py
 
-    THRESHOLD = 0.85
     for i in range(n):
         for j in range(i + 1, n):
-            if sim_matrix[i][j] >= THRESHOLD:
+            if sim_matrix[i][j] >= threshold:
                 union(i, j)
 
-    # Group by cluster
     clusters: dict[int, list[int]] = {}
     for i in range(n):
         root = find(i)
         clusters.setdefault(root, []).append(i)
 
-    # Merge clusters with 2+ members
-    merge_llm = _get_llm(configurable, temperature=0.2)
     merged_count = 0
-    deleted_ids = []
+    deleted_count = 0
 
     for root, members in clusters.items():
         if len(members) < 2:
@@ -371,26 +403,65 @@ async def consolidate_memory(state: AgentState, config: RunnableConfig) -> dict:
         merge_prompt = CONSOLIDATION_MERGE_PROMPT.format(
             entries="\n".join(f"- {f}" for f in cluster_facts)
         )
-        response = await merge_llm.ainvoke(merge_prompt)
-        merged_text = response.content.strip()
+        try:
+            response = await llm.ainvoke(merge_prompt)
+            merged_text = response.content.strip()
+        except Exception:
+            merged_text = max(cluster_facts, key=len)
 
         for cid in cluster_ids:
             await asyncio.to_thread(_sync_delete_archival, cid)
-            deleted_ids.append(cid)
+            deleted_count += 1
 
         await asyncio.to_thread(
             _sync_put_fact_to_archival,
             merged_text,
             {"source": "consolidation", "merged_from": cluster_ids, "original_count": len(members)},
+            namespace,
         )
         merged_count += 1
 
     return {
-        "memory_operations": [{
-            "type": "consolidate",
-            "total_facts": len(facts),
-            "clusters_merged": merged_count,
-            "entries_deleted": len(deleted_ids),
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-        }],
+        "namespace": namespace,
+        "total": len(facts),
+        "merged": merged_count,
+        "deleted": deleted_count,
     }
+
+
+async def consolidate_memory(state: AgentState, config: RunnableConfig) -> dict:
+    """Periodic consolidation: dedup, merge, and cleanup across all managed namespaces."""
+    configurable = Configuration.from_runnable_config(config)
+    merge_llm = _get_llm(configurable, temperature=0.2)
+
+    ops = []
+    t0 = datetime.now(timezone.utc)
+
+    # 1. conversation_facts: dedup + merge
+    result = await _consolidate_namespace(
+        "conversation_facts", merge_llm, threshold=0.85, max_entries=500,
+    )
+    ops.append({"type": "consolidate", **result, "timestamp": t0.isoformat()})
+
+    # 2. research: dedup + merge
+    result = await _consolidate_namespace(
+        "research", merge_llm, threshold=0.85, max_entries=200,
+    )
+    ops.append({"type": "consolidate", **result, "timestamp": t0.isoformat()})
+
+    # 3. ingested: cleanup old + excess (no merge — preserve original chunks)
+    cleanup_days = configurable.archival_cleanup_days
+    max_entries = configurable.archival_max_entries
+
+    cleaned = await asyncio.to_thread(_sync_cleanup_namespace, "ingested", cleanup_days)
+    excess = await asyncio.to_thread(_sync_cleanup_excess, "ingested", max_entries)
+    if cleaned or excess:
+        ops.append({
+            "type": "cleanup",
+            "namespace": "ingested",
+            "expired_deleted": cleaned,
+            "excess_deleted": excess,
+            "timestamp": t0.isoformat(),
+        })
+
+    return {"memory_operations": ops}

@@ -2,13 +2,12 @@
 
 Flow:
   START → route_intent
-    ├── "chat"        → recall_memory → respond → memory_pipeline → [consolidate?] → END
-    ├── "research"    → generate_query → web_research → reflection
-    │     ├── (gaps) → web_research → reflection (loop)
-    │     └── (sufficient) → save_to_archival → respond → memory_pipeline → [consolidate?] → END
-    ├── "recall"      → recall_memory → respond → memory_pipeline → [consolidate?] → END
-    ├── "memory_edit" → recall_memory → respond → memory_pipeline → [consolidate?] → END
-    └── "ingest"      → ingest_document → save_to_archival → respond → memory_pipeline → [consolidate?] → END
+    ├── "ingest" → ingest_document → save_to_archival → respond → memory_pipeline → [consolidate?] → END
+    └── (其他)   → recall_memory → evaluate_recall
+                     ├── (memory sufficient) → respond → memory_pipeline → [consolidate?] → END
+                     └── (memory insufficient) → generate_query → [web_research × N] → reflection
+                           ├── (gaps) → [web_research] → reflection (loop)
+                           └── (sufficient) → save_to_archival → respond → memory_pipeline → [consolidate?] → END
 """
 
 from __future__ import annotations
@@ -23,6 +22,7 @@ from langgraph.types import Send
 
 from agent.configuration import Configuration
 from agent.nodes.memory_manager import (
+    evaluate_recall,
     ingest_document_node,
     recall_memory,
     route_intent,
@@ -43,16 +43,15 @@ def route_after_intent(state: AgentState) -> str:
     mode = state.get("mode", "chat")
     if mode == "ingest":
         return "ingest_document"
-    # All other modes go through recall_memory first
+    # All other modes go through recall_memory → evaluate_recall
     return "recall_memory"
 
 
-def route_after_recall(state: AgentState) -> str:
-    """Route after recall_memory based on mode."""
-    mode = state.get("mode", "chat")
-    if mode == "research":
-        return "generate_query"
-    return "respond"
+def route_after_evaluation(state: AgentState) -> str:
+    """Route after evaluate_recall based on memory sufficiency."""
+    if state.get("memory_sufficient"):
+        return "respond"
+    return "generate_query"
 
 
 def continue_to_web_research(state: AgentState):
@@ -103,12 +102,13 @@ builder = StateGraph(AgentState, config_schema=Configuration)
 
 # Add nodes
 builder.add_node("route_intent", route_intent)
+builder.add_node("recall_memory", recall_memory)
+builder.add_node("evaluate_recall", evaluate_recall)
 builder.add_node("generate_query", generate_query)
 builder.add_node("web_research", web_research)
 builder.add_node("reflection", reflection)
 builder.add_node("ingest_document", ingest_document_node)
 builder.add_node("save_to_archival", save_to_archival)
-builder.add_node("recall_memory", recall_memory)
 builder.add_node("respond", respond)
 builder.add_node("memory_pipeline", memory_pipeline)
 builder.add_node("consolidate_memory", consolidate_memory)
@@ -119,8 +119,9 @@ builder.add_conditional_edges(
     "route_intent", route_after_intent,
     ["ingest_document", "recall_memory"],
 )
+builder.add_edge("recall_memory", "evaluate_recall")
 builder.add_conditional_edges(
-    "recall_memory", route_after_recall,
+    "evaluate_recall", route_after_evaluation,
     ["generate_query", "respond"],
 )
 builder.add_conditional_edges("generate_query", continue_to_web_research, ["web_research"])

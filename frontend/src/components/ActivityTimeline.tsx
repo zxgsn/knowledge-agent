@@ -49,8 +49,12 @@ export function ActivityTimeline({
       return <Search className="h-4 w-4 text-neutral-400" />;
     } else if (title.toLowerCase().includes("finalizing") || title.toLowerCase().includes("response")) {
       return <Pen className="h-4 w-4 text-neutral-400" />;
+    } else if (title.toLowerCase().includes("memory sufficient")) {
+      return <Database className="h-4 w-4 text-emerald-400" />;
+    } else if (title.toLowerCase().includes("memory insufficient")) {
+      return <Database className="h-4 w-4 text-yellow-400" />;
     } else if (title.toLowerCase().includes("saving") || title.toLowerCase().includes("memory")) {
-      return <Database className="h-4 w-4 text-neutral-400" />;
+      return <Database className="h-4 w-4 text-emerald-400" />;
     } else if (title.toLowerCase().includes("intent")) {
       return <Brain className="h-4 w-4 text-neutral-400" />;
     }
@@ -71,7 +75,9 @@ export function ActivityTimeline({
             className="flex items-center justify-start text-sm w-full cursor-pointer gap-2 text-neutral-100"
             onClick={() => setIsTimelineCollapsed(!isTimelineCollapsed)}
           >
-            Research
+            {processedEvents.some(e => e.title.toLowerCase().includes("memory"))
+              ? "Memory & Research"
+              : "Research"}
             {isTimelineCollapsed ? (
               <ChevronDown className="h-4 w-4 mr-2" />
             ) : (
@@ -111,11 +117,11 @@ export function ActivityTimeline({
                       <p className="text-sm text-neutral-200 font-medium mb-0.5">
                         {eventItem.title}
                       </p>
-                      <p className="text-xs text-neutral-300 leading-relaxed">
+                      <p className="text-xs text-neutral-300 leading-relaxed whitespace-pre-line">
                         {typeof eventItem.data === "string"
                           ? eventItem.data
                           : Array.isArray(eventItem.data)
-                          ? (eventItem.data as string[]).join(", ")
+                          ? (eventItem.data as string[]).join("\n")
                           : JSON.stringify(eventItem.data)}
                       </p>
                     </div>

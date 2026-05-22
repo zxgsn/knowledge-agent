@@ -16,6 +16,7 @@ A personal knowledge agent with persistent memory, built on LangGraph. It can re
 - **Intent Routing** — LLM-classified modes: Chat, Research, Recall, Memory Edit, Ingest
 - **Chat with Knowledge Retrieval** — Chat mode automatically searches Archival Memory for relevant context before generating a response
 - **Persistent Knowledge** — Research findings are stored in PostgreSQL + pgvector and survive across sessions
+- **Memory Pipeline (mem0-style)** — Automatic fact extraction, cosine dedup, conflict resolution, and consolidation after every conversation turn
 - **Full-Stack UI** — React frontend with real-time agent activity visualization
 
 ## Architecture
@@ -46,16 +47,15 @@ A personal knowledge agent with persistent memory, built on LangGraph. It can re
 
 ```
 START → route_intent
-  ├── "chat"        → recall_memory → respond → END
-  ├── "research"    → generate_query → [web_research × N] → reflection
-  │                    ├── (gaps found) → [web_research] → reflection (loop)
-  │                    └── (sufficient) → save_to_archival → respond → END
-  ├── "recall"      → recall_memory → respond → END
-  ├── "memory_edit" → recall_memory → respond → END
-  └── "ingest"      → ingest_document → save_to_archival → respond → END
+  ├── "ingest" → ingest_document → save_to_archival → respond → memory_pipeline → [consolidate?] → END
+  └── (其他)   → recall_memory → evaluate_recall
+                   ├── (memory sufficient) → respond → memory_pipeline → [consolidate?] → END
+                   └── (memory insufficient) → generate_query → [web_research × N] → reflection
+                         ├── (gaps) → [web_research] → reflection (loop)
+                         └── (sufficient) → save_to_archival → respond → memory_pipeline → [consolidate?] → END
 ```
 
-All non-research paths now go through `recall_memory` first, so the agent always has relevant knowledge context when responding.
+After `recall_memory`, the `evaluate_recall` node uses an LLM to judge whether the retrieved memory content is sufficient to answer the user's question. If sufficient, it skips web search and responds directly. If insufficient, it proceeds to web research. The mem0-style `memory_pipeline` extracts facts after every response, deduplicates against existing archival memory, and upserts new knowledge. Consolidation (Union-Find clustering + LLM merge) runs every N turns to deduplicate stored facts.
 
 ### Document Ingestion Pipeline
 
@@ -190,6 +190,88 @@ python examples/cli_chat.py
 
 View traces at `https://smith.langchain.com/` under your project. Each run shows the full execution graph with node-level timing, input/output, and token usage.
 
+## Testing & Evaluation
+
+### Recall Benchmark
+
+Tests hybrid search (vector + BM25) recall on a small built-in dataset:
+
+```bash
+cd backend
+python scripts/test_recall.py
+```
+
+### LoCoMo Evaluation
+
+[LoCoMo](https://github.com/snap-research/locomo) is a long conversation memory benchmark. It measures Recall@K (R@1, R@3, R@5, R@10) across 5 question types: single-session, multi-session, temporal, adversarial, and event-summary.
+
+**Setup:** Download the dataset (not committed to git):
+
+```bash
+cd backend
+mkdir -p data
+# Option A: HuggingFace (requires network access to huggingface.co)
+python -c "from datasets import load_dataset; ds = load_dataset('KimmoZZZ/locomo', split='test'); import json; json.dump([dict(d) for d in ds], open('data/locomo.json','w'), ensure_ascii=False, indent=2)"
+
+# Option B: Use hf-mirror.com (for restricted networks)
+HF_ENDPOINT=https://hf-mirror.com python -c "from datasets import load_dataset; ds = load_dataset('KimmoZZZ/locomo', split='test'); import json; json.dump([dict(d) for d in ds], open('data/locomo.json','w'), ensure_ascii=False, indent=2)"
+```
+
+**Run evaluation:**
+
+```bash
+# Quick test — baseline strategy, 1 sample (~2min)
+python scripts/test_locomo.py --local data/locomo.json --limit 1
+
+# Full dataset — baseline strategy (raw turns, no LLM extraction)
+python scripts/test_locomo.py --local data/locomo.json
+
+# Compare all 3 strategies (slow — requires LLM calls for extraction)
+python scripts/test_locomo.py --local data/locomo.json --strategy all
+
+# Single strategy
+python scripts/test_locomo.py --local data/locomo.json --strategy baseline
+python scripts/test_locomo.py --local data/locomo.json --strategy extracted
+python scripts/test_locomo.py --local data/locomo.json --strategy hybrid
+```
+
+**Strategies:**
+- **baseline** — Raw conversation turns stored directly (fast, no LLM calls)
+- **extracted** — Facts extracted via LLM, then stored (tests mem0 pipeline)
+- **hybrid** — Both raw turns and extracted facts in the same index
+
+Output is a Recall@K table broken down by question type. Requires PostgreSQL to be running (`docker compose up -d`).
+
+### Archival Memory Management
+
+Manage research summaries, ingested documents, and other archival entries:
+
+```bash
+cd backend
+
+# Show entry counts and age per namespace
+python scripts/manage_archival.py stats
+
+# List entries in a namespace
+python scripts/manage_archival.py list --namespace research
+python scripts/manage_archival.py list --namespace ingested --limit 10
+
+# Find and merge duplicate entries (cosine similarity >= 0.85)
+python scripts/manage_archival.py dedup --namespace research --dry-run
+python scripts/manage_archival.py dedup --namespace research
+
+# Remove entries older than N days
+python scripts/manage_archival.py cleanup --namespace research --days 30 --dry-run
+python scripts/manage_archival.py cleanup --namespace research --days 30
+
+# Full consolidation (dedup + merge via LLM)
+python scripts/manage_archival.py consolidate --namespace research
+
+# Delete all entries in a namespace
+python scripts/manage_archival.py drop --namespace locomo_baseline --dry-run
+python scripts/manage_archival.py drop --namespace locomo_baseline
+```
+
 ## Project Structure
 
 ```
@@ -202,7 +284,9 @@ knowledge-agent/
 │   ├── examples/
 │   │   └── cli_chat.py               # CLI entry point
 │   ├── scripts/
-│   │   └── test_recall.py            # Hybrid search recall benchmark
+│   │   ├── test_recall.py            # Hybrid search recall benchmark
+│   │   ├── test_locomo.py            # LoCoMo dataset evaluation (Recall@K)
+│   │   └── manage_archival.py        # Archival Memory management (stats/dedup/cleanup)
 │   └── src/agent/
 │       ├── graph.py                  # Main LangGraph definition
 │       ├── state.py                  # AgentState TypedDict
@@ -219,6 +303,7 @@ knowledge-agent/
 │       │   └── ingestion.py          # Document ingestion pipeline
 │       └── nodes/
 │           ├── memory_manager.py     # Intent routing + archival save
+│           ├── memory_pipeline.py    # mem0-style extract → dedup → upsert
 │           ├── researcher.py         # Search + research + reflection
 │           └── responder.py          # Response generation
 └── frontend/
