@@ -9,23 +9,94 @@ They operate on the agent's CoreMemory instance passed via a closure or context.
 
 from __future__ import annotations
 
-import asyncio
+import json
+import uuid
+from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Literal
 
 from langchain_core.tools import tool
 
 if TYPE_CHECKING:
     from agent.memory.core_memory import CoreMemory
-    from agent.storage.archival import ArchivalMemory
+
+
+def _sync_search_archival(query: str, limit: int = 5, alpha: float = 0.7) -> list[dict]:
+    """Hybrid search: vector similarity + BM25 keyword match."""
+    import psycopg
+    from pgvector import Vector
+    from pgvector.psycopg import register_vector
+    from agent.storage import get_db_url, get_embeddings
+
+    try:
+        embeddings = get_embeddings()
+        query_embedding = Vector(embeddings.embed_query(query))
+    except Exception:
+        return []
+
+    try:
+        conn = psycopg.connect(get_db_url(), connect_timeout=5)
+    except Exception:
+        return []
+
+    register_vector(conn)
+    rows = conn.execute(
+        """
+        SELECT content, metadata,
+               %s * (1 - (embedding <=> %s::vector))
+                 + (1 - %s) * LEAST(1, ts_rank(content_tsv, plainto_tsquery('english', %s)) * 5)
+               AS score
+        FROM archival_memory
+        WHERE 1 - (embedding <=> %s::vector) > 0.15
+        ORDER BY score DESC
+        LIMIT %s
+        """,
+        (alpha, query_embedding, alpha, query, query_embedding, int(limit)),
+    ).fetchall()
+    conn.close()
+
+    results = []
+    for row in rows:
+        score = float(row[2])
+        meta = row[1] if isinstance(row[1], dict) else json.loads(row[1])
+        results.append({"content": row[0], "metadata": meta, "score": score})
+    return results
+
+
+def _sync_put_to_archival(content: str, namespace: str, metadata: dict) -> str:
+    """Store a single entry in archival memory."""
+    import psycopg
+    from pgvector import Vector
+    from pgvector.psycopg import register_vector
+    from agent.storage import get_db_url, get_embeddings
+
+    embeddings = get_embeddings()
+    entry_id = str(uuid.uuid4())
+    metadata["timestamp"] = datetime.now(timezone.utc).isoformat()
+    embedding = Vector(embeddings.embed_query(content))
+
+    conn = psycopg.connect(get_db_url(), connect_timeout=5)
+    register_vector(conn)
+    conn.execute(
+        "INSERT INTO archival_memory (id, namespace, content, metadata, embedding) "
+        "VALUES (%s, %s, %s, %s, %s) ON CONFLICT (id) DO NOTHING",
+        (entry_id, namespace, content, json.dumps(metadata), embedding),
+    )
+    conn.commit()
+    conn.close()
+    return entry_id
 
 
 def create_memory_tools(
     core_memory: CoreMemory,
-    archival_memory: ArchivalMemory | None = None,
+    enable_archival: bool = False,
 ):
     """Factory that creates memory tools bound to specific memory instances.
 
     Returns a list of LangChain tools that can be passed to `bind_tools()`.
+
+    Args:
+        core_memory: The CoreMemory instance for reading/editing memory blocks.
+        enable_archival: If True, include archival memory search/save tools.
     """
 
     # --- Core Memory Tools ---
@@ -153,7 +224,7 @@ def create_memory_tools(
 
     # --- Archival Memory Tools ---
 
-    if archival_memory is not None:
+    if enable_archival:
 
         @tool
         def archival_memory_search(query: str, limit: int = 5) -> str:
@@ -166,9 +237,7 @@ def create_memory_tools(
                 query: The search query.
                 limit: Maximum number of results to return (default 5).
             """
-            results = asyncio.get_event_loop().run_until_complete(
-                archival_memory.search(query=query, limit=limit)
-            )
+            results = _sync_search_archival(query=query, limit=limit)
             if not results:
                 return "No relevant results found in archival memory."
 
@@ -194,11 +263,10 @@ def create_memory_tools(
                 content: The text to save. Should be self-contained and meaningful on its own.
                 source: A label describing where this knowledge came from.
             """
-            entry_id = asyncio.get_event_loop().run_until_complete(
-                archival_memory.put(
-                    content=content,
-                    metadata={"source": source, "type": "manual_save"},
-                )
+            entry_id = _sync_put_to_archival(
+                content=content,
+                namespace="manual",
+                metadata={"source": source, "type": "manual_save"},
             )
             return f"Saved to archival memory (id: {entry_id})."
 
@@ -218,44 +286,46 @@ def create_memory_tools(
                 source_type: "url" to fetch from a web URL, "text" for plain text input.
                 chunk_size: Target chunk size in characters (default 800).
             """
+            import asyncio
             from agent.storage.ingestion import ingest_text, ingest_url
 
-            if source_type == "url":
-                title, chunks = asyncio.get_event_loop().run_until_complete(
-                    ingest_url(source, chunk_size=chunk_size)
-                )
-                if not chunks:
-                    return f"Failed to extract text from URL: {source}"
-                doc_label = title
-            else:
-                chunks = asyncio.get_event_loop().run_until_complete(
-                    ingest_text(
-                        content=source,
-                        source_name="manual_text",
-                        source_type="text",
-                        chunk_size=chunk_size,
+            loop = asyncio.new_event_loop()
+            try:
+                if source_type == "url":
+                    title, chunks = loop.run_until_complete(
+                        ingest_url(source, chunk_size=chunk_size)
                     )
-                )
-                if not chunks:
-                    return "No text content to ingest."
-                doc_label = "manual_text"
+                    if not chunks:
+                        return f"Failed to extract text from URL: {source}"
+                    doc_label = title
+                else:
+                    chunks = loop.run_until_complete(
+                        ingest_text(
+                            content=source,
+                            source_name="manual_text",
+                            source_type="text",
+                            chunk_size=chunk_size,
+                        )
+                    )
+                    if not chunks:
+                        return "No text content to ingest."
+                    doc_label = "manual_text"
+            finally:
+                loop.close()
 
-            # Store all chunks in archival memory
-            entries = [
-                {
-                    "content": c.content,
-                    "metadata": {
+            ids = []
+            for c in chunks:
+                eid = _sync_put_to_archival(
+                    content=c.content,
+                    namespace="ingested",
+                    metadata={
                         "source": c.source,
                         "source_type": c.source_type,
                         "chunk_index": c.index,
                         "document": doc_label,
                     },
-                }
-                for c in chunks
-            ]
-            ids = asyncio.get_event_loop().run_until_complete(
-                archival_memory.put_batch(entries)
-            )
+                )
+                ids.append(eid)
 
             return (
                 f"Ingested '{doc_label}': {len(ids)} chunks stored in archival memory. "

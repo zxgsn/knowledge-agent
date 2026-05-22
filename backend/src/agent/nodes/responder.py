@@ -75,7 +75,7 @@ async def respond(state: AgentState, config: RunnableConfig) -> dict:
             })
 
     # Bind core memory tools so the LLM can read/edit memory
-    tools = create_memory_tools(core_memory, archival_memory=None)
+    tools = create_memory_tools(core_memory, enable_archival=True)
     llm_with_tools = llm.bind_tools(tools)
     tools_by_name = {t.name: t for t in tools}
 
