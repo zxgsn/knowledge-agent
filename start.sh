@@ -14,7 +14,7 @@ echo "=========================================="
 
 # 1. Start PostgreSQL via Docker Compose
 echo ""
-echo "[1/3] Starting PostgreSQL (Docker Compose)..."
+echo "[1/4] Starting PostgreSQL (Docker Compose)..."
 cd "$BACKEND_DIR"
 docker compose up -d postgres
 echo "  Waiting for PostgreSQL to be ready..."
@@ -25,7 +25,7 @@ echo "  PostgreSQL is ready."
 
 # 2. Start LangGraph backend
 echo ""
-echo "[2/3] Starting LangGraph backend on port 2024..."
+echo "[2/4] Starting LangGraph backend on port 2024..."
 cd "$BACKEND_DIR"
 uv run langgraph dev --port 2024 &
 BACKEND_PID=$!
@@ -38,9 +38,17 @@ until curl -s http://localhost:2024/ok >/dev/null 2>&1; do
 done
 echo "  Backend is ready."
 
-# 3. Start frontend
+# 3. Start Library API server
 echo ""
-echo "[3/3] Starting frontend on port 5173..."
+echo "[3/4] Starting Library API on port 8000..."
+cd "$BACKEND_DIR"
+uv run uvicorn src.api_server:app --port 8000 &
+API_PID=$!
+echo "  API PID: $API_PID"
+
+# 4. Start frontend
+echo ""
+echo "[4/4] Starting frontend on port 5173..."
 cd "$FRONTEND_DIR"
 npm run dev &
 FRONTEND_PID=$!
@@ -51,10 +59,12 @@ echo "=========================================="
 echo "  All services started!"
 echo "  Frontend: http://localhost:5173/app/"
 echo "  Backend:  http://localhost:2024"
+echo "  Library:  http://localhost:5173/app/library"
+echo "  API:      http://localhost:8000"
 echo "  Press Ctrl+C to stop all services"
 echo "=========================================="
 
 # Trap Ctrl+C to stop all services
-trap "echo ''; echo 'Stopping...'; kill $FRONTEND_PID $BACKEND_PID 2>/dev/null; docker compose -f '$BACKEND_DIR/docker-compose.yml' down; exit 0" INT TERM
+trap "echo ''; echo 'Stopping...'; kill $FRONTEND_PID $BACKEND_PID $API_PID 2>/dev/null; docker compose -f '$BACKEND_DIR/docker-compose.yml' down; exit 0" INT TERM
 
 wait

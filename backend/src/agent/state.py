@@ -27,6 +27,7 @@ class AgentState(TypedDict):
 
     # --- Archival / Ingest ---
     archival_results: Annotated[list, operator.add]
+    recall_results: Annotated[list, operator.add]  # conversation history search results
     doc_source: str
     doc_source_type: str
     ingest_result: str

@@ -35,3 +35,7 @@ Thumbs.db
 # Data & docs (not tracked)
 backend/data/locomo.json
 docs/
+
+# ML models (downloaded locally, not tracked)
+backend/models/
+.claude/

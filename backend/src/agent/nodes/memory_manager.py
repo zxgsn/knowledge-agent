@@ -65,7 +65,7 @@ async def route_intent(state: AgentState, config: RunnableConfig) -> dict:
 
 
 def _sync_search_archival(query: str, limit: int = 5, alpha: float = 0.7) -> list[dict]:
-    """Hybrid search: vector similarity + BM25 keyword match.
+    """Hybrid search: vector similarity + BM25 keyword match, with optional cross-encoder re-ranking.
 
     Args:
         query: Search query text.
@@ -94,6 +94,8 @@ def _sync_search_archival(query: str, limit: int = 5, alpha: float = 0.7) -> lis
         return []
 
     register_vector(conn)
+    # Fetch more candidates for re-ranking
+    candidate_limit = int(limit) * 3
     rows = conn.execute(
         """
         SELECT content, metadata,
@@ -106,7 +108,7 @@ def _sync_search_archival(query: str, limit: int = 5, alpha: float = 0.7) -> lis
         ORDER BY score DESC
         LIMIT %s
         """,
-        (alpha, query_embedding, alpha, query, query, query_embedding, int(limit)),
+        (alpha, query_embedding, alpha, query, query, query_embedding, candidate_limit),
     ).fetchall()
     conn.close()
 
@@ -116,6 +118,14 @@ def _sync_search_archival(query: str, limit: int = 5, alpha: float = 0.7) -> lis
         if score >= 0.01:
             meta = row[1] if isinstance(row[1], dict) else json.loads(row[1])
             results.append({"content": row[0], "metadata": meta, "score": score})
+
+    # Cross-encoder re-ranking
+    try:
+        from agent.storage.reranker import rerank
+        results = rerank(query, results, top_k=int(limit))
+    except Exception:
+        results = results[:int(limit)]
+
     return results
 
 
@@ -145,8 +155,74 @@ def _sync_save_to_recall(role: str, content: str, thread_id: str = "default") ->
     conn.close()
 
 
+def _sync_search_recall(query: str, limit: int = 5) -> list[dict]:
+    """Semantic search over recall_memory (conversation history).
+
+    Searches across all threads for relevant past conversations.
+    Uses pure cosine similarity (no BM25 — recall table has no content_tsv),
+    with optional cross-encoder re-ranking.
+    """
+    import psycopg
+    from pgvector import Vector
+    from pgvector.psycopg import register_vector
+
+    from agent.storage import get_db_url, get_embeddings
+
+    try:
+        embeddings = get_embeddings()
+        query_embedding = Vector(embeddings.embed_query(query))
+    except Exception as e:
+        import sys
+        print(f"[memory_manager] Recall embedding failed: {e}", file=sys.stderr)
+        return []
+
+    try:
+        conn = psycopg.connect(get_db_url(), connect_timeout=5)
+    except Exception as e:
+        import sys
+        print(f"[memory_manager] Recall DB connection failed: {e}", file=sys.stderr)
+        return []
+
+    register_vector(conn)
+    candidate_limit = int(limit) * 3
+    rows = conn.execute(
+        """
+        SELECT id, thread_id, role, content, metadata,
+               1 - (embedding <=> %s::vector) AS score
+        FROM recall_memory
+        WHERE 1 - (embedding <=> %s::vector) > 0.3
+        ORDER BY score DESC
+        LIMIT %s
+        """,
+        (query_embedding, query_embedding, candidate_limit),
+    ).fetchall()
+    conn.close()
+
+    results = []
+    for row in rows:
+        score = float(row[5])
+        meta = row[4] if isinstance(row[4], dict) else json.loads(row[4])
+        results.append({
+            "id": row[0],
+            "thread_id": row[1],
+            "role": row[2],
+            "content": row[3],
+            "metadata": meta,
+            "score": score,
+        })
+
+    # Cross-encoder re-ranking
+    try:
+        from agent.storage.reranker import rerank
+        results = rerank(query, results, top_k=int(limit))
+    except Exception:
+        results = results[:int(limit)]
+
+    return results
+
+
 async def recall_memory(state: AgentState, config: RunnableConfig) -> dict:
-    """Search archival memory for content referenced by the user."""
+    """Search archival AND recall memory for content referenced by the user."""
     from datetime import datetime, timezone
 
     user_msg = ""
@@ -156,7 +232,7 @@ async def recall_memory(state: AgentState, config: RunnableConfig) -> dict:
             break
 
     if not user_msg:
-        return {"archival_results": []}
+        return {"archival_results": [], "recall_results": []}
 
     # Save user message to recall memory
     try:
@@ -165,13 +241,19 @@ async def recall_memory(state: AgentState, config: RunnableConfig) -> dict:
         import sys
         print(f"[memory_manager] Failed to save to recall: {e}", file=sys.stderr)
 
-    results = await asyncio.to_thread(_sync_search_archival, user_msg, 5)
+    # Search both archival and recall in parallel
+    archival_task = asyncio.to_thread(_sync_search_archival, user_msg, 5)
+    recall_task = asyncio.to_thread(_sync_search_recall, user_msg, 5)
+    archival_results_raw, recall_results_raw = await asyncio.gather(
+        archival_task, recall_task
+    )
 
     # Log memory operation
     memory_ops = [{
         "type": "recall",
         "query": user_msg[:100] + "..." if len(user_msg) > 100 else user_msg,
-        "result_count": len(results),
+        "archival_count": len(archival_results_raw),
+        "recall_count": len(recall_results_raw),
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }]
 
@@ -182,7 +264,16 @@ async def recall_memory(state: AgentState, config: RunnableConfig) -> dict:
                 "source": r["metadata"].get("source", ""),
                 "score": r["score"],
             }
-            for r in results
+            for r in archival_results_raw
+        ],
+        "recall_results": [
+            {
+                "content": r["content"],
+                "role": r.get("role", ""),
+                "thread_id": r.get("thread_id", ""),
+                "score": r["score"],
+            }
+            for r in recall_results_raw
         ],
         "memory_operations": memory_ops,
     }
@@ -204,9 +295,10 @@ async def evaluate_recall(state: AgentState, config: RunnableConfig) -> dict:
             break
 
     archival_results = state.get("archival_results", [])
+    recall_results = state.get("recall_results", [])
 
     # No memory results at all — insufficient
-    if not archival_results:
+    if not archival_results and not recall_results:
         memory_ops = [{
             "type": "evaluate",
             "is_sufficient": False,
@@ -215,11 +307,18 @@ async def evaluate_recall(state: AgentState, config: RunnableConfig) -> dict:
         }]
         return {"memory_sufficient": False, "memory_evaluation": "No relevant memories found.", "memory_operations": memory_ops}
 
-    # Format memory content for evaluation
-    memory_content = "\n".join(
-        f"- [{r.get('source', 'archival')}] {r['content']} (score: {r.get('score', 0):.2f})"
-        for r in archival_results
-    )
+    # Format memory content for evaluation — include both sources
+    memory_parts = []
+    for r in archival_results:
+        memory_parts.append(
+            f"- [archival:{r.get('source', 'unknown')}] {r['content']} (score: {r.get('score', 0):.2f})"
+        )
+    for r in recall_results:
+        preview = r['content'][:200] + ("..." if len(r['content']) > 200 else "")
+        memory_parts.append(
+            f"- [recall:{r.get('role', '?')}] {preview} (score: {r.get('score', 0):.2f})"
+        )
+    memory_content = "\n".join(memory_parts)
 
     # Ask LLM to evaluate
     llm = ChatOpenAI(

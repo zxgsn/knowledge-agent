@@ -21,7 +21,7 @@ if TYPE_CHECKING:
 
 
 def _sync_search_archival(query: str, limit: int = 5, alpha: float = 0.7) -> list[dict]:
-    """Hybrid search: vector similarity + BM25 keyword match."""
+    """Hybrid search: vector similarity + BM25 keyword match, with optional cross-encoder re-ranking."""
     import psycopg
     from pgvector import Vector
     from pgvector.psycopg import register_vector
@@ -39,6 +39,7 @@ def _sync_search_archival(query: str, limit: int = 5, alpha: float = 0.7) -> lis
         return []
 
     register_vector(conn)
+    candidate_limit = int(limit) * 3
     rows = conn.execute(
         """
         SELECT content, metadata,
@@ -50,7 +51,7 @@ def _sync_search_archival(query: str, limit: int = 5, alpha: float = 0.7) -> lis
         ORDER BY score DESC
         LIMIT %s
         """,
-        (alpha, query_embedding, alpha, query, query_embedding, int(limit)),
+        (alpha, query_embedding, alpha, query, query_embedding, candidate_limit),
     ).fetchall()
     conn.close()
 
@@ -59,6 +60,14 @@ def _sync_search_archival(query: str, limit: int = 5, alpha: float = 0.7) -> lis
         score = float(row[2])
         meta = row[1] if isinstance(row[1], dict) else json.loads(row[1])
         results.append({"content": row[0], "metadata": meta, "score": score})
+
+    # Cross-encoder re-ranking
+    try:
+        from agent.storage.reranker import rerank
+        results = rerank(query, results, top_k=int(limit))
+    except Exception:
+        results = results[:int(limit)]
+
     return results
 
 

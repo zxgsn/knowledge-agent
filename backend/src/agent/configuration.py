@@ -50,6 +50,14 @@ class Configuration(BaseModel):
         default=1000,
         metadata={"description": "Max entries per namespace before forced cleanup."},
     )
+    rerank_model: str = Field(
+        default="BAAI/bge-reranker-v2-m3",
+        metadata={"description": "Cross-encoder model for re-ranking search results."},
+    )
+    rerank_enabled: bool = Field(
+        default=True,
+        metadata={"description": "Enable cross-encoder re-ranking."},
+    )
 
     @classmethod
     def from_runnable_config(

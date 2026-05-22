@@ -39,6 +39,7 @@ async def respond(state: AgentState, config: RunnableConfig) -> dict:
     core_memory = CoreMemory.from_dict(state.get("core_memory", {}))
     summaries = "\n\n---\n\n".join(state.get("web_research_result", []))
     archival_context = _format_archival_results(state.get("archival_results", []))
+    recall_context = _format_recall_results(state.get("recall_results", []))
 
     system = SYSTEM_PROMPT.format(
         current_date=get_current_date(),
@@ -77,10 +78,15 @@ async def respond(state: AgentState, config: RunnableConfig) -> dict:
                 messages_for_llm.append({"role": "user", "content": content})
             elif isinstance(msg, AIMessage) and msg.content:
                 messages_for_llm.append({"role": "assistant", "content": msg.content})
-        if archival_context:
+        if archival_context or recall_context:
+            context_parts = []
+            if archival_context:
+                context_parts.append(f"[Archival Memory]\n{archival_context}")
+            if recall_context:
+                context_parts.append(f"[Conversation History]\n{recall_context}")
             messages_for_llm.append({
                 "role": "user",
-                "content": f"[Relevant knowledge from archival memory]\n{archival_context}",
+                "content": "\n\n".join(context_parts),
             })
 
     # Bind core memory tools so the LLM can read/edit memory
@@ -133,14 +139,19 @@ async def respond(state: AgentState, config: RunnableConfig) -> dict:
     except Exception as e:
         print(f"[responder] Failed to save to recall: {e}", file=sys.stderr)
 
-    # Add memory indicator when archival results were used
+    # Add memory indicator when archival/recall results were used
     response_text = response.content
     archival_used = [r for r in state.get("archival_results", []) if r.get("score", 0) >= 0.3]
-    if archival_used:
-        indicator = f"\n\n---\n> 📚 **从记忆中检索到 {len(archival_used)} 条相关内容**"
-        for r in archival_used[:3]:
+    recall_used = [r for r in state.get("recall_results", []) if r.get("score", 0) >= 0.3]
+    if archival_used or recall_used:
+        total = len(archival_used) + len(recall_used)
+        indicator = f"\n\n---\n> 📚 **从记忆中检索到 {total} 条相关内容**"
+        for r in archival_used[:2]:
             preview = r["content"][:60] + ("..." if len(r["content"]) > 60 else "")
-            indicator += f"\n> - [{r.get('source', 'archival')}] {preview} (score: {r['score']:.2f})"
+            indicator += f"\n> - [archival:{r.get('source', '?')}] {preview} (score: {r['score']:.2f})"
+        for r in recall_used[:2]:
+            preview = r["content"][:60] + ("..." if len(r["content"]) > 60 else "")
+            indicator += f"\n> - [recall:{r.get('role', '?')}] {preview} (score: {r['score']:.2f})"
         response_text += indicator
 
     result = {
@@ -158,4 +169,17 @@ def _format_archival_results(results: list) -> str:
         score = r.get("score", 0)
         if score >= 0.3:
             parts.append(f"- {r['content']} (relevance: {score:.2f})")
+    return "\n\n".join(parts) if parts else ""
+
+
+def _format_recall_results(results: list) -> str:
+    if not results:
+        return ""
+    parts = []
+    for r in results:
+        score = r.get("score", 0)
+        if score >= 0.3:
+            role = r.get("role", "unknown")
+            content = r["content"][:300] + ("..." if len(r["content"]) > 300 else "")
+            parts.append(f"- [{role}] {content} (relevance: {score:.2f})")
     return "\n\n".join(parts) if parts else ""

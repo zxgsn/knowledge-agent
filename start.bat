@@ -51,7 +51,7 @@ if errorlevel 1 (
 
 REM 1. Start PostgreSQL via Docker Compose
 echo.
-echo [1/3] Starting PostgreSQL (Docker Compose)...
+echo [1/4] Starting PostgreSQL (Docker Compose)...
 cd /d "%BACKEND_DIR%"
 docker compose up -d postgres
 if errorlevel 1 (
@@ -71,7 +71,7 @@ echo   PostgreSQL is ready.
 
 REM 2. Start LangGraph backend
 echo.
-echo [2/3] Starting LangGraph backend on port 2024...
+echo [2/4] Starting LangGraph backend on port 2024...
 cd /d "%BACKEND_DIR%"
 start "Knowledge Agent Backend" cmd /k "uv run langgraph dev --port 2024"
 echo   Waiting for backend to be ready (max 120 seconds)...
@@ -89,9 +89,16 @@ curl -s http://localhost:2024/ok >nul 2>&1
 if errorlevel 1 goto wait_backend
 echo   Backend is ready.
 
-REM 3. Start frontend
+REM 3. Start Library API server
 echo.
-echo [3/3] Starting frontend on port 5173...
+echo [3/4] Starting Library API on port 8000...
+cd /d "%BACKEND_DIR%"
+start "Knowledge Agent API" cmd /k "uv run uvicorn src.api_server:app --port 8000"
+timeout /t 2 /nobreak >nul
+
+REM 4. Start frontend
+echo.
+echo [4/4] Starting frontend on port 5173...
 cd /d "%FRONTEND_DIR%"
 start "Knowledge Agent Frontend" cmd /k "npm run dev"
 
@@ -100,6 +107,8 @@ echo ==========================================
 echo   All services started!
 echo   Frontend: http://localhost:5173/app/
 echo   Backend:  http://localhost:2024
+echo   Library:  http://localhost:5173/app/library
+echo   API:      http://localhost:8000
 echo.
 echo   Close the terminal windows to stop.
 echo ==========================================

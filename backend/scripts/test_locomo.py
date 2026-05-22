@@ -328,8 +328,17 @@ def ingest_session_context(
     return total
 
 
-def ingest_extracted_facts(samples: list[dict], namespace: str = "locomo_extracted") -> int:
-    """Extract facts from conversations via LLM and ingest into archival memory."""
+def ingest_extracted_facts(
+    samples: list[dict],
+    namespace: str = "locomo_extracted",
+    window_size: int = 5,
+    stride: int = 3,
+) -> int:
+    """Extract facts from multi-turn windows via LLM and ingest into archival memory.
+
+    Uses overlapping windows instead of individual turns to preserve
+    conversational context, temporal relationships, and speaker attribution.
+    """
     from langchain_openai import ChatOpenAI
 
     llm = ChatOpenAI(
@@ -341,40 +350,56 @@ def ingest_extracted_facts(samples: list[dict], namespace: str = "locomo_extract
 
     embeddings = get_embeddings()
 
-    extraction_prompt = """Extract discrete facts from this conversation turn. Each fact must be a single, self-contained statement.
+    extraction_prompt = """Extract facts from this conversation segment. Each fact must be a self-contained statement that preserves WHO, WHAT, WHEN, and WHERE.
 
 Rules:
-- Each fact is one sentence, standalone (no pronouns without referent)
-- Include specific names, dates, numbers, preferences, decisions, relationships
+- Include the speaker's name in each fact (e.g. "Alex went to Paris", NOT "He went to Paris")
+- Preserve temporal context (e.g. "last week", "on Tuesday", "in session 3")
+- Preserve relationships between people, places, and events
+- Each fact should be answerable as a standalone question/answer
+- Include specific names, dates, numbers, preferences, decisions
 - Do NOT extract general knowledge or opinions
 - If no meaningful facts, return an empty list
 
-Speaker: {speaker}
-Message: {message}
+Conversation (Session {session_id}):
+{conversation}
 
-Respond with ONLY a JSON object: {{"facts": ["fact1", ...]}}"""
+Respond with ONLY a JSON object: {{"facts": ["fact1", "fact2", ...]}}"""
 
-    conn = psycopg.connect(get_db_url())
-    register_vector(conn)
-
-    # Collect all turns first for progress tracking
-    all_turns = []
+    # Build multi-turn windows
+    windows = []
     for sample in samples:
         sid = sample["sample_id"]
         for session in sample["conversation"]:
             session_id = session["session_id"]
-            for turn in session["dialogue"]:
-                if not isinstance(turn, dict):
+            turns = [t for t in session["dialogue"] if isinstance(t, dict)]
+            for start in range(0, len(turns), stride):
+                chunk = turns[start : start + window_size]
+                if not chunk:
                     continue
-                speaker = turn.get("speaker", turn.get("role", "unknown"))
-                utterance = turn.get("utterance", turn.get("content", turn.get("text", "")))
-                if utterance and utterance.strip():
-                    all_turns.append({"sid": sid, "session_id": session_id, "speaker": speaker, "utterance": utterance})
+                lines = []
+                for t in chunk:
+                    speaker = t.get("speaker", t.get("role", "unknown"))
+                    utterance = t.get("utterance", t.get("content", t.get("text", "")))
+                    if utterance and utterance.strip():
+                        lines.append(f"{speaker}: {utterance}")
+                if not lines:
+                    continue
+                windows.append({
+                    "sid": sid,
+                    "session_id": session_id,
+                    "start_turn": start,
+                    "conversation": "\n".join(lines),
+                })
 
+    # Extract facts from each window
     all_facts = []
-    for t in tqdm(all_turns, desc="  Extracting facts", unit="turn"):
+    for w in tqdm(windows, desc="  Extracting facts", unit="win"):
         try:
-            prompt = extraction_prompt.format(speaker=t["speaker"], message=t["utterance"])
+            prompt = extraction_prompt.format(
+                session_id=w["session_id"],
+                conversation=w["conversation"],
+            )
             response = llm.invoke(prompt)
             parsed = json.loads(_strip_json_fences(response.content))
             facts = parsed.get("facts", [])
@@ -387,8 +412,9 @@ Respond with ONLY a JSON object: {{"facts": ["fact1", ...]}}"""
             all_facts.append({
                 "content": fact,
                 "metadata": {
-                    "sample_id": t["sid"],
-                    "session_id": t["session_id"],
+                    "sample_id": w["sid"],
+                    "session_id": w["session_id"],
+                    "start_turn": w["start_turn"],
                     "source": "locomo_extracted",
                     "type": "extracted_fact",
                     "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -396,6 +422,9 @@ Respond with ONLY a JSON object: {{"facts": ["fact1", ...]}}"""
             })
 
     # Batch embed and insert
+    conn = psycopg.connect(get_db_url())
+    register_vector(conn)
+
     total = 0
     for i in range(0, len(all_facts), BATCH_SIZE):
         batch = all_facts[i : i + BATCH_SIZE]
@@ -413,7 +442,7 @@ Respond with ONLY a JSON object: {{"facts": ["fact1", ...]}}"""
 
     conn.commit()
     conn.close()
-    print(f"  Extracted {total} facts from {len(all_turns)} turns into '{namespace}'.")
+    print(f"  Extracted {total} facts from {len(windows)} windows into '{namespace}'.")
     return total
 
 

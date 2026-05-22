@@ -1,9 +1,11 @@
 import { useStream } from "@langchain/langgraph-sdk/react";
 import type { Message } from "@langchain/langgraph-sdk";
 import { useState, useEffect, useRef, useCallback } from "react";
+import { Routes, Route } from "react-router-dom";
 import { ProcessedEvent } from "@/components/ActivityTimeline";
 import { WelcomeScreen } from "@/components/WelcomeScreen";
 import { ChatMessagesView } from "@/components/ChatMessagesView";
+import { DocumentLibrary } from "@/components/DocumentLibrary";
 import { Button } from "@/components/ui/button";
 
 export default function App() {
@@ -51,17 +53,27 @@ export default function App() {
       } else if (event.recall_memory) {
         const memOps = event.recall_memory?.memory_operations;
         const recallOp = Array.isArray(memOps) ? memOps.find((op: any) => op.type === "recall") : null;
-        const resultCount = recallOp?.result_count ?? 0;
+        const archivalCount = recallOp?.archival_count ?? 0;
+        const recallCount = recallOp?.recall_count ?? 0;
+        const totalResults = archivalCount + recallCount;
         const archivalResults = event.recall_memory?.archival_results ?? [];
-        const previews = archivalResults
-          .slice(0, 3)
-          .map((r: any) => {
+        const recallResults = event.recall_memory?.recall_results ?? [];
+        const previews = [
+          ...archivalResults.slice(0, 2).map((r: any) => {
             const content = r.content || "";
             const preview = content.length > 60 ? content.slice(0, 60) + "..." : content;
-            return `[${r.source || "archival"}] ${preview} (${(r.score ?? 0).toFixed(2)})`;
-          });
+            return `[archival] ${preview} (${(r.score ?? 0).toFixed(2)})`;
+          }),
+          ...recallResults.slice(0, 2).map((r: any) => {
+            const content = r.content || "";
+            const preview = content.length > 60 ? content.slice(0, 60) + "..." : content;
+            return `[recall:${r.role || "?"}] ${preview} (${(r.score ?? 0).toFixed(2)})`;
+          }),
+        ];
         processedEvent = {
-          title: resultCount > 0 ? `Memory Retrieved (${resultCount} results)` : "Memory Search (no results)",
+          title: totalResults > 0
+            ? `Memory Retrieved (${archivalCount} archival, ${recallCount} recall)`
+            : "Memory Search (no results)",
           data: previews.length > 0 ? previews.join("\n") : "No relevant memories found.",
         };
       } else if (event.evaluate_recall) {
@@ -240,38 +252,46 @@ export default function App() {
 
   return (
     <div className="flex h-screen bg-neutral-800 text-neutral-100 font-sans antialiased">
-      <main className="h-full w-full max-w-4xl mx-auto">
-        {error ? (
-          <div className="flex flex-col items-center justify-center h-full">
-            <div className="flex flex-col items-center justify-center gap-4">
-              <h1 className="text-2xl text-red-400 font-bold">Error</h1>
-              <p className="text-red-400">{JSON.stringify(error)}</p>
-              <Button
-                variant="destructive"
-                onClick={() => window.location.reload()}
-              >
-                Retry
-              </Button>
-            </div>
-          </div>
-        ) : thread.messages.length === 0 ? (
-          <WelcomeScreen
-            handleSubmit={handleSubmit}
-            isLoading={thread.isLoading}
-            onCancel={handleCancel}
-          />
-        ) : (
-          <ChatMessagesView
-            messages={thread.messages}
-            isLoading={thread.isLoading}
-            scrollAreaRef={scrollAreaRef}
-            onSubmit={handleSubmit}
-            onCancel={handleCancel}
-            liveActivityEvents={processedEventsTimeline}
-            historicalActivities={historicalActivities}
-          />
-        )}
-      </main>
+      <Routes>
+        <Route path="/library" element={<DocumentLibrary />} />
+        <Route
+          path="*"
+          element={
+            <main className="h-full w-full max-w-4xl mx-auto">
+              {error ? (
+                <div className="flex flex-col items-center justify-center h-full">
+                  <div className="flex flex-col items-center justify-center gap-4">
+                    <h1 className="text-2xl text-red-400 font-bold">Error</h1>
+                    <p className="text-red-400">{JSON.stringify(error)}</p>
+                    <Button
+                      variant="destructive"
+                      onClick={() => window.location.reload()}
+                    >
+                      Retry
+                    </Button>
+                  </div>
+                </div>
+              ) : thread.messages.length === 0 ? (
+                <WelcomeScreen
+                  handleSubmit={handleSubmit}
+                  isLoading={thread.isLoading}
+                  onCancel={handleCancel}
+                />
+              ) : (
+                <ChatMessagesView
+                  messages={thread.messages}
+                  isLoading={thread.isLoading}
+                  scrollAreaRef={scrollAreaRef}
+                  onSubmit={handleSubmit}
+                  onCancel={handleCancel}
+                  liveActivityEvents={processedEventsTimeline}
+                  historicalActivities={historicalActivities}
+                />
+              )}
+            </main>
+          }
+        />
+      </Routes>
     </div>
   );
 }
