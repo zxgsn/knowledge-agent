@@ -56,7 +56,7 @@ async def route_intent(state: AgentState, config: RunnableConfig) -> dict:
     return {"mode": mode, "need_recall": need_recall}
 
 
-async def _rewrite_query(user_msg: str, messages: list) -> str:
+async def _rewrite_query(user_msg: str, messages: list, config: Configuration) -> str:
     """Rewrite ambiguous/referential queries into self-contained form."""
     recent = []
     for m in messages[-6:]:
@@ -73,7 +73,7 @@ async def _rewrite_query(user_msg: str, messages: list) -> str:
         f"Latest message: {user_msg}"
     )
     try:
-        llm = get_llm(Configuration(), temperature=0.0)
+        llm = get_llm(config, temperature=0.0)
         response = await llm.ainvoke(prompt)
         rewritten = response.content.strip().strip('"')
         return rewritten if rewritten else user_msg
@@ -112,9 +112,10 @@ async def recall_memory(state: AgentState, config: RunnableConfig) -> dict:
     if not user_msg:
         return {"archival_results": [], "recall_results": []}
 
-    # Save user message to recall memory
+    # Save user message to recall memory (thread-isolated)
+    thread_id = state.get("thread_id", "default")
     try:
-        await asyncio.to_thread(save_to_recall, "user", user_msg)
+        await asyncio.to_thread(save_to_recall, "user", user_msg, thread_id=thread_id)
     except Exception as e:
         import sys
         print(f"[memory_manager] Failed to save to recall: {e}", file=sys.stderr)
@@ -127,7 +128,7 @@ async def recall_memory(state: AgentState, config: RunnableConfig) -> dict:
             and turn_count < configurable.proactive_memory_turns):
         archival_results_raw, recall_results_raw = await asyncio.gather(
             asyncio.to_thread(get_recent_archival, 3),
-            asyncio.to_thread(get_recent_recall, 3),
+            asyncio.to_thread(get_recent_recall, 3, thread_id=thread_id),
         )
         memory_ops = [{
             "type": "proactive_recall",
@@ -151,7 +152,7 @@ async def recall_memory(state: AgentState, config: RunnableConfig) -> dict:
     # Step 1: Query rewriting (if enabled)
     search_query = user_msg
     if configurable.memory_query_rewrite_enabled:
-        search_query = await _rewrite_query(user_msg, state["messages"])
+        search_query = await _rewrite_query(user_msg, state["messages"], configurable)
 
     # Step 2: HyDE (if enabled) — generate hypothetical answer for embedding
     search_query_for_embed = search_query
@@ -159,8 +160,13 @@ async def recall_memory(state: AgentState, config: RunnableConfig) -> dict:
         search_query_for_embed = await _generate_hypothetical(search_query, configurable)
 
     # Step 3: Search both archival and recall in parallel
-    archival_task = asyncio.to_thread(search_archival, search_query_for_embed, 5)
-    recall_task = asyncio.to_thread(search_recall, search_query, 5)
+    archival_task = asyncio.to_thread(
+        search_archival, search_query_for_embed, 5,
+        rerank_enabled=configurable.rerank_enabled,
+        mmr_enabled=configurable.mmr_enabled,
+        mmr_lambda=configurable.mmr_lambda,
+    )
+    recall_task = asyncio.to_thread(search_recall, search_query, 5, thread_id=thread_id)
     archival_results_raw, recall_results_raw = await asyncio.gather(
         archival_task, recall_task
     )

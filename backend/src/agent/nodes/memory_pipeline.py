@@ -24,8 +24,13 @@ from agent.db import (
     search_archival_for_dedup,
     update_archival,
 )
+
+# How often (in turns) to store a session context window
+_CONTEXT_WINDOW_INTERVAL = 3
+_CONTEXT_WINDOW_SIZE = 10  # max messages in a window
 from agent.prompts import (
     CONSOLIDATION_MERGE_PROMPT,
+    FACT_CONFLICT_PROMPT,
     MEMORY_JUDGMENT_PROMPT,
     SELECTIVE_EXTRACTION_PROMPT,
 )
@@ -124,7 +129,10 @@ async def memory_pipeline(state: AgentState, config: RunnableConfig) -> dict:
             }],
         }
 
-    # Step 4: Execute operations
+    # Step 4: Conflict resolution for ADD operations
+    operations = await _resolve_conflicts(operations, existing, llm)
+
+    # Step 5: Execute operations
     stored_count = 0
     updated_count = 0
     deleted_count = 0
@@ -166,7 +174,7 @@ async def memory_pipeline(state: AgentState, config: RunnableConfig) -> dict:
             skipped_count += 1
             fact_log.append({"fact": text, "action": "skipped", "reason": f"event:{event}"})
 
-    return {
+    result = {
         "turn_count": turn_count,
         "pipeline_facts": fact_log,
         "memory_operations": [{
@@ -181,6 +189,106 @@ async def memory_pipeline(state: AgentState, config: RunnableConfig) -> dict:
             "timestamp": datetime.now(timezone.utc).isoformat(),
         }],
     }
+
+    # Step 6: Store session context window periodically
+    if turn_count % _CONTEXT_WINDOW_INTERVAL == 0:
+        ctx = _build_context_window(messages)
+        if ctx:
+            await asyncio.to_thread(
+                put_to_archival,
+                ctx,
+                "session_context",
+                {"source": "session_window", "turn": turn_count, "msg_count": min(len(messages), _CONTEXT_WINDOW_SIZE)},
+            )
+            result["memory_operations"].append({
+                "type": "session_context_window",
+                "turn_count": turn_count,
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+            })
+
+    return result
+
+
+async def _resolve_conflicts(
+    operations: list[dict],
+    existing: list[dict],
+    llm,
+) -> list[dict]:
+    """Check ADD operations against existing memories for conflicts.
+
+    Uses FACT_CONFLICT_PROMPT to decide whether an ADD should become
+    an UPDATE (merge with existing) or be skipped.
+    """
+    if not existing:
+        return operations
+
+    existing_map = {m["id"]: m["content"] for m in existing}
+    resolved = []
+
+    for op in operations:
+        event = op.get("event", "ADD").upper()
+        text = op.get("text", "").strip()
+
+        if event != "ADD" or not text:
+            resolved.append(op)
+            continue
+
+        # Check if this new fact conflicts with any existing memory
+        best_match = None
+        best_score = 0.0
+        for mem in existing:
+            # Simple heuristic: check if the fact shares significant content
+            # The extraction prompt already provides existing context, so this
+            # is a second-pass refinement for borderline cases
+            mem_content = mem["content"]
+            common_words = set(text.lower().split()) & set(mem_content.lower().split())
+            # Jaccard-ish similarity on words
+            if len(common_words) >= 3:
+                score = len(common_words) / max(len(text.split()), len(mem_content.split()))
+                if score > best_score:
+                    best_score = score
+                    best_match = mem
+
+        if best_match and best_score >= 0.3:
+            # Potential conflict — ask LLM to decide
+            prompt = FACT_CONFLICT_PROMPT.format(
+                new_fact=text,
+                existing_fact=best_match["content"],
+                score=f"{best_score:.2f}",
+            )
+            try:
+                response = await llm.ainvoke(prompt)
+                from agent.utils import parse_json
+                decision = parse_json(response.content)
+                if decision.get("decision") == "skip":
+                    op = {**op, "event": "NOOP", "reason": decision.get("reason", "conflict_skip")}
+                elif decision.get("decision") == "update" and decision.get("merged"):
+                    op = {
+                        **op,
+                        "event": "UPDATE",
+                        "id": best_match["id"],
+                        "text": decision["merged"],
+                        "old_memory": best_match["content"],
+                        "reason": decision.get("reason", "conflict_merge"),
+                    }
+            except Exception:
+                pass  # Keep original ADD if conflict resolution fails
+
+        resolved.append(op)
+
+    return resolved
+
+
+def _build_context_window(messages: list) -> str:
+    """Build a multi-turn context window from recent messages."""
+    recent = messages[-_CONTEXT_WINDOW_SIZE:]
+    lines = []
+    for msg in recent:
+        if isinstance(msg, HumanMessage) and msg.content:
+            lines.append(f"User: {msg.content[:500]}")
+        elif isinstance(msg, AIMessage) and msg.content:
+            lines.append(f"Assistant: {msg.content[:500]}")
+    return "\n".join(lines) if len(lines) >= 2 else ""
 
 
 async def _consolidate_namespace(
@@ -294,10 +402,22 @@ async def consolidate_memory(state: AgentState, config: RunnableConfig) -> dict:
     )
     ops.append({"type": "consolidate", **result, "timestamp": t0.isoformat()})
 
-    # 3. ingested: cleanup old + excess (no merge — preserve original chunks)
+    # 3. session_context: cleanup old + excess
     cleanup_days = configurable.archival_cleanup_days
     max_entries = configurable.archival_max_entries
 
+    cleaned = await asyncio.to_thread(cleanup_namespace, "session_context", cleanup_days)
+    excess = await asyncio.to_thread(cleanup_excess, "session_context", max_entries)
+    if cleaned or excess:
+        ops.append({
+            "type": "cleanup",
+            "namespace": "session_context",
+            "expired_deleted": cleaned,
+            "excess_deleted": excess,
+            "timestamp": t0.isoformat(),
+        })
+
+    # 4. ingested: cleanup old + excess (no merge — preserve original chunks)
     cleaned = await asyncio.to_thread(cleanup_namespace, "ingested", cleanup_days)
     excess = await asyncio.to_thread(cleanup_excess, "ingested", max_entries)
     if cleaned or excess:

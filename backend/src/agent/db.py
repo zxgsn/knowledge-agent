@@ -76,13 +76,23 @@ def _mmr_rerank(
 # --- Archival Memory ---
 
 
-def search_archival(query: str, limit: int = 5, alpha: float = 0.7) -> list[dict]:
+def search_archival(
+    query: str,
+    limit: int = 5,
+    alpha: float = 0.7,
+    rerank_enabled: bool | None = None,
+    mmr_enabled: bool | None = None,
+    mmr_lambda: float | None = None,
+) -> list[dict]:
     """Hybrid search: vector similarity + BM25 keyword match, with cross-encoder re-ranking.
 
     Args:
         query: Search query text.
         limit: Max results after re-ranking.
         alpha: Weight for vector score (1-alpha for BM25). Default 0.7.
+        rerank_enabled: Override env RERANK_ENABLED. None = use env.
+        mmr_enabled: Override env MMR_ENABLED. None = use env.
+        mmr_lambda: Override env MMR_LAMBDA. None = use env.
     """
     from pgvector import Vector
 
@@ -126,14 +136,15 @@ def search_archival(query: str, limit: int = 5, alpha: float = 0.7) -> list[dict
     # Cross-encoder re-ranking
     try:
         from agent.storage.reranker import rerank
-        results = rerank(query, results, top_k=int(limit))
+        results = rerank(query, results, top_k=int(limit), enabled=rerank_enabled)
     except Exception:
         results = results[: int(limit)]
 
     # MMR deduplication
-    if os.getenv("MMR_ENABLED", "false").lower() in ("true", "1", "yes") and len(results) > 1:
-        lambda_p = float(os.getenv("MMR_LAMBDA", "0.5"))
-        results = _mmr_rerank(query_embedding_flat, results, lambda_param=lambda_p, top_k=int(limit))
+    _mmr_on = mmr_enabled if mmr_enabled is not None else os.getenv("MMR_ENABLED", "false").lower() in ("true", "1", "yes")
+    if _mmr_on and len(results) > 1:
+        _lambda = mmr_lambda if mmr_lambda is not None else float(os.getenv("MMR_LAMBDA", "0.5"))
+        results = _mmr_rerank(query_embedding_flat, results, lambda_param=_lambda, top_k=int(limit))
 
     return results
 
@@ -444,10 +455,15 @@ def save_to_recall(role: str, content: str, thread_id: str = "default") -> None:
         conn.commit()
 
 
-def search_recall(query: str, limit: int = 5) -> list[dict]:
+def search_recall(query: str, limit: int = 5, thread_id: str | None = None) -> list[dict]:
     """Semantic search over recall_memory (conversation history).
 
     Uses pure cosine similarity with optional cross-encoder re-ranking.
+
+    Args:
+        query: Search query text.
+        limit: Max results after re-ranking.
+        thread_id: If provided, only search within this thread/session.
     """
     from pgvector import Vector
 
@@ -463,17 +479,31 @@ def search_recall(query: str, limit: int = 5) -> list[dict]:
     try:
         with get_conn() as conn:
             candidate_limit = int(limit) * 3
-            rows = conn.execute(
-                """
-                SELECT id, thread_id, role, content, metadata,
-                       1 - (embedding <=> %s::vector) AS score
-                FROM recall_memory
-                WHERE 1 - (embedding <=> %s::vector) > 0.3
-                ORDER BY score DESC
-                LIMIT %s
-                """,
-                (query_embedding, query_embedding, candidate_limit),
-            ).fetchall()
+            if thread_id:
+                rows = conn.execute(
+                    """
+                    SELECT id, thread_id, role, content, metadata,
+                           1 - (embedding <=> %s::vector) AS score
+                    FROM recall_memory
+                    WHERE thread_id = %s
+                      AND 1 - (embedding <=> %s::vector) > 0.3
+                    ORDER BY score DESC
+                    LIMIT %s
+                    """,
+                    (query_embedding, thread_id, query_embedding, candidate_limit),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    """
+                    SELECT id, thread_id, role, content, metadata,
+                           1 - (embedding <=> %s::vector) AS score
+                    FROM recall_memory
+                    WHERE 1 - (embedding <=> %s::vector) > 0.3
+                    ORDER BY score DESC
+                    LIMIT %s
+                    """,
+                    (query_embedding, query_embedding, candidate_limit),
+                ).fetchall()
     except Exception as e:
         logger.error("Recall search failed: %s", e)
         return []
@@ -501,18 +531,31 @@ def search_recall(query: str, limit: int = 5) -> list[dict]:
     return results
 
 
-def get_recent_recall(limit: int = 5) -> list[dict]:
-    """Fetch most recent recall memory entries."""
+def get_recent_recall(limit: int = 5, thread_id: str | None = None) -> list[dict]:
+    """Fetch most recent recall memory entries.
+
+    Args:
+        limit: Max entries to return.
+        thread_id: If provided, only fetch from this thread/session.
+    """
     from agent.storage import ensure_recall_table
 
     try:
         ensure_recall_table()
         with get_conn() as conn:
-            rows = conn.execute(
-                "SELECT id, thread_id, role, content, metadata "
-                "FROM recall_memory ORDER BY created_at DESC LIMIT %s",
-                (int(limit),),
-            ).fetchall()
+            if thread_id:
+                rows = conn.execute(
+                    "SELECT id, thread_id, role, content, metadata "
+                    "FROM recall_memory WHERE thread_id = %s "
+                    "ORDER BY created_at DESC LIMIT %s",
+                    (thread_id, int(limit)),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT id, thread_id, role, content, metadata "
+                    "FROM recall_memory ORDER BY created_at DESC LIMIT %s",
+                    (int(limit),),
+                ).fetchall()
     except Exception:
         return []
 

@@ -14,6 +14,7 @@ class AgentState(TypedDict):
     mode: str  # "chat" | "research" | "memory_edit" | "ingest" | "recall"
     need_recall: bool  # whether to query archival memory before responding
     core_memory: dict[str, str]  # {label: value} - persisted core memory blocks
+    thread_id: str  # session/thread identifier for recall memory isolation
 
     # --- Research subgraph ---
     search_query: list[str]

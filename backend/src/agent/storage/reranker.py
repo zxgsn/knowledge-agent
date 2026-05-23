@@ -39,13 +39,19 @@ def _get_model():
     return _model
 
 
-def rerank(query: str, results: list[dict], top_k: int = 5) -> list[dict]:
+def rerank(
+    query: str,
+    results: list[dict],
+    top_k: int = 5,
+    enabled: bool | None = None,
+) -> list[dict]:
     """Re-rank search results using cross-encoder scoring.
 
     Args:
         query: The search query.
         results: List of dicts with at least 'content' and 'score' keys.
         top_k: Number of top results to return after re-ranking.
+        enabled: Override env RERANK_ENABLED. None = use env.
 
     Returns:
         Re-ranked results with 'score' replaced by cross-encoder score.
@@ -53,8 +59,9 @@ def rerank(query: str, results: list[dict], top_k: int = 5) -> list[dict]:
     if not results:
         return []
 
-    enabled = os.getenv("RERANK_ENABLED", "true").lower()
-    if enabled in ("false", "0", "no"):
+    if enabled is None:
+        enabled = os.getenv("RERANK_ENABLED", "true").lower() not in ("false", "0", "no")
+    if not enabled:
         return results[:top_k]
 
     try:

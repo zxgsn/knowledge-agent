@@ -120,9 +120,10 @@ async def respond(state: AgentState, config: RunnableConfig) -> dict:
         for label in needs_compression:
             await core_memory.compress_block(label, compress_llm)
 
-    # Save AI response to recall memory
+    # Save AI response to recall memory (thread-isolated)
+    thread_id = state.get("thread_id", "default")
     try:
-        await asyncio.to_thread(save_to_recall, "assistant", response.content)
+        await asyncio.to_thread(save_to_recall, "assistant", response.content, thread_id=thread_id)
     except Exception as e:
         print(f"[responder] Failed to save to recall: {e}", file=sys.stderr)
 
