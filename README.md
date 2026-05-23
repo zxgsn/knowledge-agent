@@ -196,10 +196,7 @@ knowledge-agent/
 
 ## Roadmap
 
-- [ ] **Manual Library CRUD** — Full create/read/update/delete support for manual knowledge entries in Document Library's Manual tab.
-  - Backend: `POST /api/archival/entries` (create), `PUT /api/archival/entries/{id}` (update content/metadata)
-  - Frontend: "Add Entry" button + form (content input, optional metadata), inline edit mode for existing entries, delete (already implemented)
-  - Use case: users can directly manage knowledge base entries without going through the chat/ingest flow
+_No items currently planned. Contributions welcome._
 
 ## Acknowledgments
 
