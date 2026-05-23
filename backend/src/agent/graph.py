@@ -2,7 +2,9 @@
 
 Flow:
   START → route_intent
-    ├── "ingest" → ingest_document → save_to_archival → respond → memory_pipeline → [consolidate?] → END
+    ├── "ingest" → ingest_document → [has_question?]
+    │     ├── yes → recall_memory → respond → memory_pipeline → [consolidate?] → END
+    │     └── no  → respond → memory_pipeline → [consolidate?] → END
     └── (其他)   → recall_memory → evaluate_recall
                      ├── (memory sufficient) → respond → memory_pipeline → [consolidate?] → END
                      └── (memory insufficient) → generate_query → [web_research × N] → reflection
@@ -52,6 +54,13 @@ def route_after_intent(state: AgentState, config: RunnableConfig) -> str:
             return "recall_memory"
         return "respond"
     return "recall_memory"
+
+
+def route_after_ingest(state: AgentState) -> str:
+    """Route after ingest_document: if user asked a question, search memory first."""
+    if state.get("ingest_question"):
+        return "recall_memory"
+    return "respond"
 
 
 def route_after_evaluation(state: AgentState) -> str:
@@ -136,7 +145,9 @@ builder.add_edge("web_research", "reflection")
 builder.add_conditional_edges(
     "reflection", evaluate_research, ["web_research", "save_to_archival"]
 )
-builder.add_edge("ingest_document", "save_to_archival")
+builder.add_conditional_edges(
+    "ingest_document", route_after_ingest, ["recall_memory", "respond"]
+)
 builder.add_edge("save_to_archival", "respond")
 builder.add_edge("respond", "memory_pipeline")
 builder.add_conditional_edges(

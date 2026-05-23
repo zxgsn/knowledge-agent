@@ -32,6 +32,7 @@ class AgentState(TypedDict):
     doc_source: str
     doc_source_type: str
     ingest_result: str
+    ingest_question: str  # extracted question from ingest+question combined message
 
     # --- Memory Pipeline ---
     turn_count: int

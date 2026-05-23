@@ -339,11 +339,29 @@ def _get_research_topic(messages: list) -> str:
     return "\n".join(parts) if parts else ""
 
 
+def _extract_question(content: str, source_type: str, doc_source: str) -> str:
+    """Extract user question from a combined ingest+question message.
+
+    Returns the question text (stripped), or empty string if none found.
+    """
+    if source_type == "pdf":
+        # Text before [UPLOAD_PDF:...] tag
+        before = re.split(r"\[UPLOAD_PDF:", content, maxsplit=1)[0]
+        return before.strip()
+    if source_type == "url":
+        # Remove the URL from content, keep the rest
+        remaining = content.replace(doc_source, "").strip()
+        return remaining
+    # Text type: entire message is the document source
+    return ""
+
+
 async def ingest_document_node(state: AgentState, config: RunnableConfig) -> dict:
     """Ingest a document (URL, text, or PDF) into the knowledge base.
 
     Extracts text -> chunks -> embeds -> stores in archival memory.
-    Supports PDF upload via base64 encoding from the frontend.
+    If the user also asked a question alongside the document, extracts it
+    into ingest_question so the graph can route through recall → respond.
     """
     import base64
     from datetime import datetime, timezone
@@ -361,16 +379,17 @@ async def ingest_document_node(state: AgentState, config: RunnableConfig) -> dic
     doc_source = state.get("doc_source", "")
     source_type = state.get("doc_source_type", "url")
     pdf_filename = ""
+    original_content = ""
 
     if not doc_source:
         for msg in reversed(state["messages"]):
             if isinstance(msg, HumanMessage):
-                content = msg.content
+                original_content = msg.content
 
                 # Check for PDF upload from frontend
                 pdf_match = re.match(
                     r"\[UPLOAD_PDF:(.+?)\](.+?)\[/UPLOAD_PDF\]",
-                    content,
+                    original_content,
                     re.DOTALL,
                 )
                 if pdf_match:
@@ -379,12 +398,12 @@ async def ingest_document_node(state: AgentState, config: RunnableConfig) -> dic
                     source_type = "pdf"
                     break
 
-                url_match = re.search(r"https?://\S+", content)
+                url_match = re.search(r"https?://\S+", original_content)
                 if url_match:
                     doc_source = url_match.group(0)
                     source_type = "url"
                 else:
-                    doc_source = content
+                    doc_source = original_content
                     source_type = "text"
                 break
 
@@ -461,8 +480,22 @@ async def ingest_document_node(state: AgentState, config: RunnableConfig) -> dic
             "timestamp": datetime.now(timezone.utc).isoformat(),
         }]
 
+        # Extract user question from combined message (if any)
+        question = _extract_question(original_content, source_type, doc_source)
+
+        # Rewrite user message so downstream nodes see clean text
+        messages = list(state["messages"])
+        for i in range(len(messages) - 1, -1, -1):
+            if isinstance(messages[i], HumanMessage):
+                messages[i] = HumanMessage(
+                    content=question or f"Ingested document: {doc_label}"
+                )
+                break
+
         return {
             "ingest_result": result,
+            "ingest_question": question,
+            "messages": messages,
             "archival_results": [
                 {
                     "id": eid,
