@@ -196,7 +196,7 @@ knowledge-agent/
 
 ## Roadmap
 
-_No items currently planned. Contributions welcome._
+- **Edit support for all namespaces** — Currently only `manual` entries can be edited from the Document Library UI. Extend inline edit to `ingested`, `research`, and other archival namespaces.
 
 ## Acknowledgments
 
