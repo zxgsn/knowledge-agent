@@ -194,7 +194,10 @@ knowledge-agent/
 
 ## 未来计划
 
-- [ ] **文档库手动管理** — 在 Document Library 的 Manual 标签页支持手动创建/编辑条目。后端：添加 POST/PUT 端点。前端：添加新建表单 + 条目编辑功能。
+- [ ] **文档库手动管理** — 在 Document Library 的 Manual 标签页支持完整的知识条目增删改查。
+  - 后端：`POST /api/archival/entries`（创建）、`PUT /api/archival/entries/{id}`（更新内容/元数据）
+  - 前端："新建条目"按钮 + 表单（内容输入、可选元数据）、已有条目内联编辑、删除（已实现）
+  - 场景：用户可直接管理知识库条目，无需通过聊天/摄取流程
 
 ## 致谢
 
