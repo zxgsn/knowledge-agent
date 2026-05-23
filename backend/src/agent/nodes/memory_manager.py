@@ -11,6 +11,8 @@ from langchain_core.runnables import RunnableConfig
 
 from agent.configuration import Configuration
 from agent.db import (
+    get_recent_archival,
+    get_recent_recall,
     insert_document,
     put_batch_to_archival,
     put_to_archival,
@@ -116,6 +118,35 @@ async def recall_memory(state: AgentState, config: RunnableConfig) -> dict:
     except Exception as e:
         import sys
         print(f"[memory_manager] Failed to save to recall: {e}", file=sys.stderr)
+
+    # Proactive memory: push recent memories at conversation start
+    mode = state.get("mode", "chat")
+    turn_count = state.get("turn_count", 0)
+    if (configurable.proactive_memory_enabled
+            and mode == "chat"
+            and turn_count < configurable.proactive_memory_turns):
+        archival_results_raw, recall_results_raw = await asyncio.gather(
+            asyncio.to_thread(get_recent_archival, 3),
+            asyncio.to_thread(get_recent_recall, 3),
+        )
+        memory_ops = [{
+            "type": "proactive_recall",
+            "turn_count": turn_count,
+            "archival_count": len(archival_results_raw),
+            "recall_count": len(recall_results_raw),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        }]
+        return {
+            "archival_results": [
+                {"content": r["content"], "source": r.get("metadata", {}).get("source", ""), "score": r.get("score", 1.0)}
+                for r in archival_results_raw
+            ],
+            "recall_results": [
+                {"content": r["content"], "role": r.get("role", ""), "thread_id": r.get("thread_id", ""), "score": r.get("score", 1.0)}
+                for r in recall_results_raw
+            ],
+            "memory_operations": memory_ops,
+        }
 
     # Step 1: Query rewriting (if enabled)
     search_query = user_msg

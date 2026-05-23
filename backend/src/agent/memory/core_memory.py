@@ -16,6 +16,7 @@ class CoreMemory:
         self._blocks: list[Block] = blocks if blocks is not None else [
             b.model_copy(deep=True) for b in DEFAULT_BLOCKS
         ]
+        self._edit_history: list[dict] = []
 
     @property
     def blocks(self) -> list[Block]:
@@ -34,13 +35,49 @@ class CoreMemory:
                 return
         self._blocks.append(block)
 
-    def update_block_value(self, label: str, value: str) -> None:
+    def _record_edit(self, label: str, old_value: str, new_value: str, operation: str) -> None:
+        """Record an edit in the history stack."""
+        self._edit_history.append({
+            "label": label,
+            "old_value": old_value,
+            "new_value": new_value,
+            "operation": operation,
+        })
+        # Keep history bounded
+        if len(self._edit_history) > 50:
+            self._edit_history = self._edit_history[-50:]
+
+    def update_block_value(self, label: str, value: str, record: bool = True) -> None:
         block = self.get_block(label)
         if len(value) > block.limit:
             raise ValueError(
                 f"Value for block '{label}' exceeds limit: {len(value)} > {block.limit}"
             )
+        if record:
+            self._record_edit(label, block.value, value, "update")
         block.value = value
+
+    def undo_last_edit(self) -> dict | None:
+        """Undo the last edit. Returns the undone edit info, or None if no history."""
+        if not self._edit_history:
+            return None
+        entry = self._edit_history.pop()
+        label = entry["label"]
+        old_value = entry["old_value"]
+        if entry["operation"] == "create":
+            # Block was created — remove it entirely
+            self._blocks = [b for b in self._blocks if b.label != label]
+        else:
+            try:
+                block = self.get_block(label)
+                block.value = old_value
+            except KeyError:
+                pass
+        return entry
+
+    def get_edit_history(self) -> list[dict]:
+        """Return the edit history (read-only copy)."""
+        return list(self._edit_history)
 
     async def compress_block(self, label: str, llm) -> bool:
         """Compress a block that's approaching its character limit.
@@ -104,6 +141,13 @@ class CoreMemory:
         """Serialize blocks to a simple dict for state storage."""
         return {b.label: b.value for b in self._blocks}
 
+    def to_dict_with_history(self) -> dict:
+        """Serialize blocks and edit history for state storage."""
+        return {
+            "blocks": {b.label: b.value for b in self._blocks},
+            "edit_history": self._edit_history,
+        }
+
     @classmethod
     def from_dict(cls, data: dict[str, str], templates: list[Block] | None = None) -> CoreMemory:
         """Reconstruct CoreMemory from a dict of {label: value}.
@@ -111,16 +155,26 @@ class CoreMemory:
         Templates provide the metadata (description, limit, read_only).
         If a label exists in data but not in templates, a default Block is created.
         """
+        # Handle new format with history
+        if "blocks" in data and isinstance(data["blocks"], dict):
+            block_data = data["blocks"]
+            history = data.get("edit_history", [])
+        else:
+            block_data = data
+            history = []
+
         template_map = {}
         source = templates if templates is not None else DEFAULT_BLOCKS
         for t in source:
             template_map[t.label] = t
 
         blocks: list[Block] = []
-        for label, value in data.items():
+        for label, value in block_data.items():
             if label in template_map:
                 block = template_map[label].model_copy(update={"value": value})
             else:
                 block = Block(label=label, value=value)
             blocks.append(block)
-        return cls(blocks=blocks or None)
+        cm = cls(blocks=blocks or None)
+        cm._edit_history = history
+        return cm

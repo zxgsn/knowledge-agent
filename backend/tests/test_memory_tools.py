@@ -194,6 +194,45 @@ class TestCoreMemoryView:
         assert "Error" in result
 
 
+class TestCoreMemoryUndo:
+    def _setup(self):
+        cm = CoreMemory()
+        cm.update_block_value("human", "User is Alice.")
+        tools = create_memory_tools(cm)
+        return cm, _get_tool(tools, "core_memory_undo")
+
+    def test_undo_replace(self):
+        cm, tool = self._setup()
+        replace_tool = _get_tool(create_memory_tools(cm), "core_memory_replace")
+        replace_tool.invoke({"label": "human", "old_string": "Alice", "new_string": "Bob"})
+        assert "Bob" in cm.get_block("human").value
+
+        result = tool.invoke({})
+        assert "Undid" in result
+        assert "Alice" in cm.get_block("human").value
+        assert "Bob" not in cm.get_block("human").value
+
+    def test_undo_no_history(self):
+        cm = CoreMemory()
+        tools = create_memory_tools(cm)
+        tool = _get_tool(tools, "core_memory_undo")
+        result = tool.invoke({})
+        assert "No edits" in result
+
+    def test_undo_create(self):
+        cm = CoreMemory()
+        tools = create_memory_tools(cm)
+        rethink_tool = _get_tool(tools, "core_memory_rethink")
+        undo_tool = _get_tool(tools, "core_memory_undo")
+
+        rethink_tool.invoke({"label": "new_block", "new_memory": "some content"})
+        assert "new_block" in cm.list_labels()
+
+        result = undo_tool.invoke({})
+        assert "Undid" in result
+        assert "new_block" not in cm.list_labels()
+
+
 class TestCreateMemoryTools:
     def test_returns_core_tools_only(self):
         cm = CoreMemory()
@@ -203,6 +242,7 @@ class TestCreateMemoryTools:
         assert "core_memory_insert" in names
         assert "core_memory_rethink" in names
         assert "core_memory_view" in names
+        assert "core_memory_undo" in names
         assert "archival_memory_search" not in names
 
     def test_returns_archival_tools_when_enabled(self):
@@ -215,5 +255,5 @@ class TestCreateMemoryTools:
 
     def test_tools_count(self):
         cm = CoreMemory()
-        assert len(create_memory_tools(cm, enable_archival=False)) == 4
-        assert len(create_memory_tools(cm, enable_archival=True)) == 7
+        assert len(create_memory_tools(cm, enable_archival=False)) == 5
+        assert len(create_memory_tools(cm, enable_archival=True)) == 8

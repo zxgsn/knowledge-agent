@@ -112,6 +112,7 @@ def create_memory_tools(
             label: The memory block label. If it doesn't exist, a new block is created.
             new_memory: The new full content for this block.
         """
+        is_new = False
         try:
             block = core_memory.get_block(label)
             if block.read_only:
@@ -120,9 +121,15 @@ def create_memory_tools(
             from agent.memory.block import Block
             block = Block(label=label)
             core_memory.set_block(block)
+            is_new = True
 
         try:
-            core_memory.update_block_value(label, new_memory)
+            if is_new:
+                # Record creation: old_value is empty
+                core_memory._record_edit(label, "", new_memory, "create")
+                core_memory.update_block_value(label, new_memory, record=False)
+            else:
+                core_memory.update_block_value(label, new_memory)
         except ValueError as e:
             return f"Error: {e}"
 
@@ -151,7 +158,19 @@ def create_memory_tools(
         else:
             return core_memory.compile()
 
-    tools = [core_memory_replace, core_memory_insert, core_memory_rethink, core_memory_view]
+    @tool
+    def core_memory_undo() -> str:
+        """Undo the last core memory edit. Reverts the most recent change to a block."""
+        entry = core_memory.undo_last_edit()
+        if entry is None:
+            return "Error: No edits to undo."
+        label = entry["label"]
+        op = entry["operation"]
+        if op == "create":
+            return f"Undid creation of block '{label}'. Block removed."
+        return f"Undid {op} on block '{label}'. Reverted to previous value."
+
+    tools = [core_memory_replace, core_memory_insert, core_memory_rethink, core_memory_view, core_memory_undo]
 
     # --- Archival Memory Tools ---
 

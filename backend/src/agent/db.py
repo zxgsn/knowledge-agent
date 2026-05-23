@@ -402,6 +402,25 @@ def cleanup_excess(namespace: str, max_entries: int) -> int:
         return 0
 
 
+def get_recent_archival(limit: int = 5) -> list[dict]:
+    """Fetch most recent archival entries across all namespaces."""
+    try:
+        with get_conn() as conn:
+            rows = conn.execute(
+                "SELECT content, metadata FROM archival_memory "
+                "ORDER BY created_at DESC LIMIT %s",
+                (int(limit),),
+            ).fetchall()
+    except Exception:
+        return []
+
+    results = []
+    for row in rows:
+        meta = row[1] if isinstance(row[1], dict) else json.loads(row[1])
+        results.append({"content": row[0], "metadata": meta, "score": 1.0})
+    return results
+
+
 # --- Recall Memory ---
 
 
@@ -479,4 +498,33 @@ def search_recall(query: str, limit: int = 5) -> list[dict]:
     except Exception:
         results = results[: int(limit)]
 
+    return results
+
+
+def get_recent_recall(limit: int = 5) -> list[dict]:
+    """Fetch most recent recall memory entries."""
+    from agent.storage import ensure_recall_table
+
+    try:
+        ensure_recall_table()
+        with get_conn() as conn:
+            rows = conn.execute(
+                "SELECT id, thread_id, role, content, metadata "
+                "FROM recall_memory ORDER BY created_at DESC LIMIT %s",
+                (int(limit),),
+            ).fetchall()
+    except Exception:
+        return []
+
+    results = []
+    for row in rows:
+        meta = row[4] if isinstance(row[4], dict) else json.loads(row[4])
+        results.append({
+            "id": row[0],
+            "thread_id": row[1],
+            "role": row[2],
+            "content": row[3],
+            "metadata": meta,
+            "score": 1.0,
+        })
     return results

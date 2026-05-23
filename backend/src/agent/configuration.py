@@ -94,6 +94,14 @@ class Configuration(BaseModel):
         default=0.5,
         metadata={"description": "MMR lambda parameter: 1.0=pure relevance, 0.0=pure diversity."},
     )
+    proactive_memory_enabled: bool = Field(
+        default=False,
+        metadata={"description": "Proactively push relevant memories at conversation start."},
+    )
+    proactive_memory_turns: int = Field(
+        default=3,
+        metadata={"description": "Number of initial turns to activate proactive memory."},
+    )
 
     @classmethod
     def from_runnable_config(

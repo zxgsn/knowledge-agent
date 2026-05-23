@@ -143,7 +143,7 @@ async def respond(state: AgentState, config: RunnableConfig) -> dict:
 
     result = {
         "messages": [AIMessage(content=response_text)],
-        "core_memory": core_memory.to_dict(),
+        "core_memory": core_memory.to_dict_with_history(),
     }
     return result
 

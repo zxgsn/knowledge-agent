@@ -156,3 +156,111 @@ class TestCoreMemory:
         cm.set_block(block)
         needing = cm.get_blocks_needing_compression()
         assert "readonly" not in needing
+
+
+class TestEditHistory:
+    def test_update_records_history(self):
+        cm = CoreMemory()
+        cm.update_block_value("human", "Alice")
+        history = cm.get_edit_history()
+        assert len(history) == 1
+        assert history[0]["label"] == "human"
+        assert history[0]["old_value"] == ""
+        assert history[0]["new_value"] == "Alice"
+        assert history[0]["operation"] == "update"
+
+    def test_multiple_edits_recorded(self):
+        cm = CoreMemory()
+        cm.update_block_value("human", "Alice")
+        cm.update_block_value("human", "Bob")
+        assert len(cm.get_edit_history()) == 2
+
+    def test_update_without_record(self):
+        cm = CoreMemory()
+        cm.update_block_value("human", "Alice", record=False)
+        assert len(cm.get_edit_history()) == 0
+
+    def test_history_bounded_at_50(self):
+        cm = CoreMemory()
+        for i in range(60):
+            cm.update_block_value("human", f"val_{i}")
+        assert len(cm.get_edit_history()) == 50
+
+    def test_record_edit_method(self):
+        cm = CoreMemory()
+        cm._record_edit("human", "old", "new", "create")
+        history = cm.get_edit_history()
+        assert history[0]["operation"] == "create"
+
+
+class TestUndo:
+    def test_undo_update(self):
+        cm = CoreMemory()
+        cm.update_block_value("human", "Alice")
+        cm.update_block_value("human", "Bob")
+        assert cm.get_block("human").value == "Bob"
+
+        entry = cm.undo_last_edit()
+        assert entry["label"] == "human"
+        assert entry["operation"] == "update"
+        assert cm.get_block("human").value == "Alice"
+
+    def test_undo_multiple(self):
+        cm = CoreMemory()
+        cm.update_block_value("human", "Alice")
+        cm.update_block_value("human", "Bob")
+        cm.update_block_value("human", "Charlie")
+
+        cm.undo_last_edit()
+        assert cm.get_block("human").value == "Bob"
+        cm.undo_last_edit()
+        assert cm.get_block("human").value == "Alice"
+
+    def test_undo_empty_history(self):
+        cm = CoreMemory()
+        assert cm.undo_last_edit() is None
+
+    def test_undo_create_removes_block(self):
+        cm = CoreMemory()
+        cm._record_edit("new_block", "", "some value", "create")
+        cm.set_block(Block(label="new_block", value="some value"))
+        assert "new_block" in cm.list_labels()
+
+        entry = cm.undo_last_edit()
+        assert entry["operation"] == "create"
+        assert "new_block" not in cm.list_labels()
+
+    def test_get_edit_history_returns_copy(self):
+        cm = CoreMemory()
+        cm.update_block_value("human", "Alice")
+        h = cm.get_edit_history()
+        h.clear()
+        assert len(cm.get_edit_history()) == 1
+
+
+class TestToDictWithHistory:
+    def test_includes_blocks_and_history(self):
+        cm = CoreMemory()
+        cm.update_block_value("human", "Alice")
+        d = cm.to_dict_with_history()
+        assert "blocks" in d
+        assert "edit_history" in d
+        assert d["blocks"]["human"] == "Alice"
+        assert len(d["edit_history"]) == 1
+
+    def test_roundtrip_with_history(self):
+        cm = CoreMemory()
+        cm.update_block_value("human", "Alice")
+        cm.update_block_value("human", "Bob")
+        d = cm.to_dict_with_history()
+
+        cm2 = CoreMemory.from_dict(d)
+        assert cm2.get_block("human").value == "Bob"
+        assert len(cm2.get_edit_history()) == 2
+
+    def test_from_dict_backward_compatible(self):
+        """Old format (plain dict) should still work."""
+        data = {"persona": "I am a bot", "human": "Alice"}
+        cm = CoreMemory.from_dict(data)
+        assert cm.get_block("human").value == "Alice"
+        assert len(cm.get_edit_history()) == 0
