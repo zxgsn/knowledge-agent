@@ -550,7 +550,7 @@ export function DocumentLibrary() {
                     ))}
                   </div>
                 )
-              ) : visibleEntries.length === 0 && recallEntries.length === 0 && !showCreateForm ? (
+              ) : activeTab !== "manual" && visibleEntries.length === 0 && recallEntries.length === 0 ? (
                 <div className="text-center text-neutral-500 py-12">No entries found.</div>
               ) : (
                 <div className="grid gap-2">
