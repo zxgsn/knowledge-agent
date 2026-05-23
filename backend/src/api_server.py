@@ -288,7 +288,7 @@ def get_document(doc_id: str):
         # Fetch associated chunks
         chunk_rows = conn.execute(
             "SELECT id, namespace, content, metadata, created_at::text "
-            "FROM archival_memory WHERE document_id = %s ORDER BY created_at",
+            "FROM archival_memory WHERE document_id = %s ORDER BY (metadata->>'chunk_index')::int",
             (doc_id,),
         ).fetchall()
 
