@@ -142,7 +142,7 @@ def _find_split_point(text: str, max_len: int) -> int:
             if best >= max_len * 0.5:
                 return best
     # Fallback: split at space
-    space = text.rfind(" ", max_len * 0.5, max_len)
+    space = text.rfind(" ", int(max_len * 0.5), max_len)
     if space > 0:
         return space
     return max_len
