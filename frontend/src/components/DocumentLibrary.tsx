@@ -177,7 +177,11 @@ export function DocumentLibrary() {
     setLoading(false);
   }, [activeTab, search]);
 
-  const HIDDEN_NAMESPACES = ["locomo_baseline", "locomo_context", "locomo_extracted", "ingested", "conversation_facts"];
+  const HIDDEN_NAMESPACES = [
+    "locomo_baseline", "locomo_context", "locomo_extracted",
+    "locomo_bench_baseline", "locomo_bench_context",
+    "ingested", "conversation_facts", "session_context", "test",
+  ];
   const EXCLUDE_NS_PARAM = HIDDEN_NAMESPACES.join(",");
 
   const visibleStats = stats.filter((s) => !HIDDEN_NAMESPACES.includes(s.namespace));
