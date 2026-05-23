@@ -121,13 +121,78 @@ export function ActivityTimeline({
                       <p className="text-sm text-neutral-200 font-medium mb-0.5">
                         {eventItem.title}
                       </p>
-                      <p className="text-xs text-neutral-300 leading-relaxed whitespace-pre-line">
-                        {typeof eventItem.data === "string"
-                          ? eventItem.data
-                          : Array.isArray(eventItem.data)
-                          ? (eventItem.data as string[]).join("\n")
-                          : JSON.stringify(eventItem.data)}
-                      </p>
+                      {Array.isArray(eventItem.data) &&
+                      eventItem.data.length > 0 &&
+                      typeof eventItem.data[0] === "object" &&
+                      "type" in eventItem.data[0] ? (
+                        <div className="space-y-1.5 mt-1">
+                          {eventItem.data.map(
+                            (item: any, i: number) => (
+                              <div
+                                key={i}
+                                className="rounded-md bg-neutral-800/70 px-2.5 py-1.5 text-xs"
+                              >
+                                <p className="text-neutral-200 leading-relaxed mb-1">
+                                  {item.content?.length > 160
+                                    ? item.content.slice(0, 160) + "…"
+                                    : item.content}
+                                </p>
+                                <div className="flex flex-wrap gap-1.5">
+                                  {item.type && (
+                                    <span
+                                      className={`inline-flex items-center rounded px-1.5 py-0.5 text-[10px] font-medium ${
+                                        item.type === "archival"
+                                          ? "bg-emerald-900/60 text-emerald-300"
+                                          : "bg-blue-900/60 text-blue-300"
+                                      }`}
+                                    >
+                                      {item.type}
+                                    </span>
+                                  )}
+                                  {item.sourceType && (
+                                    <span className="inline-flex items-center rounded bg-neutral-700 px-1.5 py-0.5 text-[10px] text-neutral-300">
+                                      {item.sourceType}
+                                    </span>
+                                  )}
+                                  {item.document && (
+                                    <span className="inline-flex items-center rounded bg-neutral-700 px-1.5 py-0.5 text-[10px] text-neutral-300">
+                                      📄 {item.document}
+                                    </span>
+                                  )}
+                                  {item.namespace && (
+                                    <span className="inline-flex items-center rounded bg-neutral-700 px-1.5 py-0.5 text-[10px] text-neutral-300">
+                                      {item.namespace}
+                                    </span>
+                                  )}
+                                  {item.timestamp && (
+                                    <span className="inline-flex items-center rounded bg-neutral-700 px-1.5 py-0.5 text-[10px] text-neutral-400">
+                                      {new Date(item.timestamp).toLocaleDateString()}
+                                    </span>
+                                  )}
+                                  {item.role && (
+                                    <span className="inline-flex items-center rounded bg-neutral-700 px-1.5 py-0.5 text-[10px] text-neutral-300">
+                                      {item.role}
+                                    </span>
+                                  )}
+                                  {item.score > 0 && (
+                                    <span className="inline-flex items-center rounded bg-neutral-700 px-1.5 py-0.5 text-[10px] text-neutral-400">
+                                      {(item.score * 100).toFixed(0)}%
+                                    </span>
+                                  )}
+                                </div>
+                              </div>
+                            )
+                          )}
+                        </div>
+                      ) : (
+                        <p className="text-xs text-neutral-300 leading-relaxed whitespace-pre-line">
+                          {typeof eventItem.data === "string"
+                            ? eventItem.data
+                            : Array.isArray(eventItem.data)
+                            ? (eventItem.data as string[]).join("\n")
+                            : JSON.stringify(eventItem.data)}
+                        </p>
+                      )}
                     </div>
                   </div>
                 ))}

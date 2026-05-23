@@ -139,7 +139,15 @@ async def recall_memory(state: AgentState, config: RunnableConfig) -> dict:
         }]
         return {
             "archival_results": [
-                {"content": r["content"], "source": r.get("metadata", {}).get("source", ""), "score": r.get("score", 1.0)}
+                {
+                    "content": r["content"],
+                    "source": r.get("metadata", {}).get("source", ""),
+                    "source_type": r.get("metadata", {}).get("source_type", ""),
+                    "document": r.get("metadata", {}).get("document", ""),
+                    "namespace": r.get("namespace", ""),
+                    "timestamp": r.get("metadata", {}).get("timestamp", ""),
+                    "score": r.get("score", 1.0),
+                }
                 for r in archival_results_raw
             ],
             "recall_results": [
@@ -185,6 +193,10 @@ async def recall_memory(state: AgentState, config: RunnableConfig) -> dict:
             {
                 "content": r["content"],
                 "source": r["metadata"].get("source", ""),
+                "source_type": r["metadata"].get("source_type", ""),
+                "document": r["metadata"].get("document", ""),
+                "namespace": r.get("namespace", ""),
+                "timestamp": r["metadata"].get("timestamp", ""),
                 "score": r["score"],
             }
             for r in archival_results_raw

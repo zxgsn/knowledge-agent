@@ -111,7 +111,7 @@ def search_archival(
             candidate_limit = int(limit) * 3
             rows = conn.execute(
                 f"""
-                SELECT content, metadata,
+                SELECT content, metadata, namespace,
                        %s * (1 - (embedding <=> %s::vector))
                          + (1 - %s) * LEAST(1, ts_rank(content_tsv, plainto_tsquery('{_TS_CONFIG}', %s)) * 5)
                        AS score
@@ -128,10 +128,10 @@ def search_archival(
 
     results = []
     for row in rows:
-        score = float(row[2])
+        score = float(row[3])
         if score >= 0.01:
             meta = row[1] if isinstance(row[1], dict) else json.loads(row[1])
-            results.append({"content": row[0], "metadata": meta, "score": score})
+            results.append({"content": row[0], "metadata": meta, "namespace": row[2], "score": score})
 
     # Cross-encoder re-ranking
     try:

@@ -62,23 +62,30 @@ export default function App() {
         const totalResults = archivalCount + recallCount;
         const archivalResults = event.recall_memory?.archival_results ?? [];
         const recallResults = event.recall_memory?.recall_results ?? [];
-        const previews = [
-          ...archivalResults.slice(0, 2).map((r: any) => {
-            const content = r.content || "";
-            const preview = content.length > 60 ? content.slice(0, 60) + "..." : content;
-            return `[archival] ${preview} (${(r.score ?? 0).toFixed(2)})`;
-          }),
-          ...recallResults.slice(0, 2).map((r: any) => {
-            const content = r.content || "";
-            const preview = content.length > 60 ? content.slice(0, 60) + "..." : content;
-            return `[recall:${r.role || "?"}] ${preview} (${(r.score ?? 0).toFixed(2)})`;
-          }),
+        const memoryItems = [
+          ...archivalResults.slice(0, 3).map((r: any) => ({
+            type: "archival",
+            content: r.content || "",
+            source: r.source || "",
+            sourceType: r.source_type || "",
+            document: r.document || "",
+            namespace: r.namespace || "",
+            timestamp: r.timestamp || "",
+            score: r.score ?? 0,
+          })),
+          ...recallResults.slice(0, 2).map((r: any) => ({
+            type: "recall",
+            content: r.content || "",
+            role: r.role || "",
+            threadId: r.thread_id || "",
+            score: r.score ?? 0,
+          })),
         ];
         processedEvent = {
           title: totalResults > 0
             ? `Memory Retrieved (${archivalCount} archival, ${recallCount} recall)`
             : "Memory Search (no results)",
-          data: previews.length > 0 ? previews.join("\n") : "No relevant memories found.",
+          data: memoryItems.length > 0 ? memoryItems : "No relevant memories found.",
         };
       } else if (event.evaluate_recall) {
         const memOps = event.evaluate_recall?.memory_operations;
