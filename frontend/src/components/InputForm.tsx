@@ -102,7 +102,9 @@ export const InputForm: React.FC<InputFormProps> = ({
     if (e) e.preventDefault();
 
     if (pendingFile) {
-      const msg = `[UPLOAD_PDF:${pendingFile.name}]${pendingFile.base64}[/UPLOAD_PDF]`;
+      const prompt = internalInputValue.trim();
+      const pdfTag = `[UPLOAD_PDF:${pendingFile.name}]${pendingFile.base64}[/UPLOAD_PDF]`;
+      const msg = prompt ? `${prompt} ${pdfTag}` : pdfTag;
       onSubmit(msg, "ingest");
       setPendingFile(null);
       setInternalInputValue("");
