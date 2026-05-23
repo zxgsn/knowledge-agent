@@ -87,6 +87,17 @@ class DocumentStats(BaseModel):
     by_source_type: dict[str, int]
 
 
+class CreateEntryRequest(BaseModel):
+    content: str
+    namespace: str = "manual"
+    metadata: dict = {}
+
+
+class UpdateEntryRequest(BaseModel):
+    content: str
+    metadata: dict | None = None
+
+
 # --- DB helper ---
 
 
@@ -421,6 +432,65 @@ def delete_archival_entry(entry_id: str):
         raise HTTPException(status_code=404, detail="Entry not found")
 
     return {"deleted": True, "entry_id": entry_id}
+
+
+@app.post("/api/archival/entries", response_model=ArchivalEntry)
+def create_archival_entry(req: CreateEntryRequest):
+    """Create a new archival memory entry."""
+    from agent.db import put_to_archival
+    from agent.storage import get_conn
+
+    entry_id = put_to_archival(
+        content=req.content,
+        namespace=req.namespace,
+        metadata=req.metadata,
+    )
+
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT id, namespace, content, metadata, created_at::text "
+            "FROM archival_memory WHERE id = %s",
+            (entry_id,),
+        ).fetchone()
+
+    return ArchivalEntry(
+        id=row[0], namespace=row[1], content=row[2],
+        metadata=_parse_meta(row[3]), created_at=row[4],
+    )
+
+
+@app.put("/api/archival/entries/{entry_id}", response_model=ArchivalEntry)
+def update_archival_entry(entry_id: str, req: UpdateEntryRequest):
+    """Update an existing archival memory entry."""
+    from fastapi import HTTPException
+
+    from agent.db import update_archival
+    from agent.storage import get_conn
+
+    # Check entry exists
+    with get_conn() as conn:
+        existing = conn.execute(
+            "SELECT metadata FROM archival_memory WHERE id = %s",
+            (entry_id,),
+        ).fetchone()
+        if not existing:
+            raise HTTPException(status_code=404, detail="Entry not found")
+
+    # Merge metadata: use provided or keep existing
+    meta = req.metadata if req.metadata is not None else _parse_meta(existing[0])
+    update_archival(entry_id, req.content, meta)
+
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT id, namespace, content, metadata, created_at::text "
+            "FROM archival_memory WHERE id = %s",
+            (entry_id,),
+        ).fetchone()
+
+    return ArchivalEntry(
+        id=row[0], namespace=row[1], content=row[2],
+        metadata=_parse_meta(row[3]), created_at=row[4],
+    )
 
 
 @app.delete("/api/recall/entries/{entry_id}")

@@ -6,7 +6,7 @@ import { Badge } from "@/components/ui/badge";
 import { Card, CardContent } from "@/components/ui/card";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { ScrollArea } from "@/components/ui/scroll-area";
-import { ArrowLeft, Search, BookOpen, MessageSquare, RefreshCw, FileText, ChevronDown, ChevronRight, Trash2 } from "lucide-react";
+import { ArrowLeft, Search, BookOpen, MessageSquare, RefreshCw, FileText, ChevronDown, ChevronRight, Trash2, Plus, Pencil } from "lucide-react";
 
 interface ArchivalEntry {
   id: string;
@@ -92,6 +92,10 @@ export function DocumentLibrary() {
   const [selectedChunkId, setSelectedChunkId] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [total, setTotal] = useState(0);
+  const [showCreateForm, setShowCreateForm] = useState(false);
+  const [editingEntryId, setEditingEntryId] = useState<string | null>(null);
+  const [formContent, setFormContent] = useState("");
+  const [formMetadata, setFormMetadata] = useState("{}");
 
   const fetchStats = useCallback(async () => {
     try {
@@ -270,6 +274,73 @@ export function DocumentLibrary() {
     } catch (err) {
       alert(`Delete failed: ${err}`);
     }
+  };
+
+  const handleCreateEntry = async () => {
+    if (!formContent.trim()) return;
+    let metadata = {};
+    try {
+      metadata = JSON.parse(formMetadata || "{}");
+    } catch {
+      alert("Metadata must be valid JSON");
+      return;
+    }
+    try {
+      const res = await fetch(`${API_BASE}/api/archival/entries`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ content: formContent, namespace: "manual", metadata }),
+      });
+      if (res.ok) {
+        const entry = await res.json();
+        setEntries((prev) => [entry, ...prev]);
+        setShowCreateForm(false);
+        setFormContent("");
+        setFormMetadata("{}");
+        fetchStats();
+      } else {
+        alert(`Create failed (${res.status}): ${await res.text()}`);
+      }
+    } catch (err) {
+      alert(`Create failed: ${err}`);
+    }
+  };
+
+  const handleUpdateEntry = async (entryId: string) => {
+    if (!formContent.trim()) return;
+    let metadata: Record<string, unknown> | undefined;
+    if (formMetadata.trim()) {
+      try {
+        metadata = JSON.parse(formMetadata);
+      } catch {
+        alert("Metadata must be valid JSON");
+        return;
+      }
+    }
+    try {
+      const res = await fetch(`${API_BASE}/api/archival/entries/${entryId}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ content: formContent, metadata }),
+      });
+      if (res.ok) {
+        const updated = await res.json();
+        setEntries((prev) => prev.map((e) => (e.id === entryId ? updated : e)));
+        setEditingEntryId(null);
+        setFormContent("");
+        setFormMetadata("{}");
+      } else {
+        alert(`Update failed (${res.status}): ${await res.text()}`);
+      }
+    } catch (err) {
+      alert(`Update failed: ${err}`);
+    }
+  };
+
+  const startEdit = (entry: ArchivalEntry) => {
+    setEditingEntryId(entry.id);
+    setFormContent(entry.content);
+    setFormMetadata(JSON.stringify(entry.metadata, null, 2));
   };
 
   return (
@@ -479,17 +550,67 @@ export function DocumentLibrary() {
                     ))}
                   </div>
                 )
-              ) : visibleEntries.length === 0 && recallEntries.length === 0 ? (
+              ) : visibleEntries.length === 0 && recallEntries.length === 0 && !showCreateForm ? (
                 <div className="text-center text-neutral-500 py-12">No entries found.</div>
               ) : (
                 <div className="grid gap-2">
+                  {/* Add Entry button (Manual tab only) */}
+                  {activeTab === "manual" && (
+                    <>
+                      {!showCreateForm ? (
+                        <Button
+                          variant="outline"
+                          className="border-dashed border-neutral-600 text-neutral-400 hover:text-neutral-200 hover:border-neutral-500 justify-start"
+                          onClick={() => { setShowCreateForm(true); setFormContent(""); setFormMetadata("{}"); }}
+                        >
+                          <Plus className="w-4 h-4 mr-2" /> Add Entry
+                        </Button>
+                      ) : (
+                        <Card className="bg-neutral-700 border-amber-600/50">
+                          <CardContent className="p-3 space-y-2">
+                            <p className="text-xs text-neutral-400 font-medium">New Entry</p>
+                            <textarea
+                              value={formContent}
+                              onChange={(e) => setFormContent(e.target.value)}
+                              placeholder="Content..."
+                              className="w-full bg-neutral-800 text-neutral-200 text-sm rounded p-2 min-h-[80px] resize-y border border-neutral-600 focus:border-amber-600 outline-none"
+                            />
+                            <Input
+                              value={formMetadata}
+                              onChange={(e) => setFormMetadata(e.target.value)}
+                              placeholder='Metadata (JSON, e.g. {"source": "manual"})'
+                              className="bg-neutral-800 border-neutral-600 text-neutral-200 text-xs h-8"
+                            />
+                            <div className="flex gap-2 justify-end">
+                              <Button
+                                variant="ghost"
+                                size="sm"
+                                className="text-neutral-400"
+                                onClick={() => { setShowCreateForm(false); setFormContent(""); setFormMetadata("{}"); }}
+                              >
+                                Cancel
+                              </Button>
+                              <Button
+                                size="sm"
+                                className="bg-amber-600 hover:bg-amber-700 text-white"
+                                onClick={handleCreateEntry}
+                                disabled={!formContent.trim()}
+                              >
+                                Save
+                              </Button>
+                            </div>
+                          </CardContent>
+                        </Card>
+                      )}
+                    </>
+                  )}
                   {visibleEntries.map((entry) => (
                     <Card
                       key={entry.id}
                       className={`bg-neutral-700 border-neutral-600 cursor-pointer hover:border-neutral-500 transition-colors ${
                         selectedEntry?.id === entry.id ? "border-neutral-400" : ""
                       }`}
-                      onClick={() => setSelectedEntry(selectedEntry?.id === entry.id ? null : entry)}
+                      onClick={() => { if (editingEntryId !== entry.id) setSelectedEntry(selectedEntry?.id === entry.id ? null : entry); }}
                     >
                       <CardContent className="p-3">
                         <div className="flex items-center gap-2 mb-1">
@@ -509,6 +630,17 @@ export function DocumentLibrary() {
                           <span className="text-xs text-neutral-500 ml-auto">
                             {timeAgo(entry.created_at)}
                           </span>
+                          {activeTab === "manual" && (
+                            <Button
+                              variant="ghost"
+                              size="icon"
+                              className="h-6 w-6 text-neutral-500 hover:text-amber-400"
+                              onClick={(e) => { e.stopPropagation(); startEdit(entry); }}
+                              title="Edit entry"
+                            >
+                              <Pencil className="w-3.5 h-3.5" />
+                            </Button>
+                          )}
                           <Button
                             variant="ghost"
                             size="icon"
@@ -519,18 +651,54 @@ export function DocumentLibrary() {
                             <Trash2 className="w-3.5 h-3.5" />
                           </Button>
                         </div>
-                        <p className="text-sm text-neutral-200">
-                          {selectedEntry?.id === entry.id
-                            ? entry.content
-                            : truncate(entry.content, 200)}
-                        </p>
-                        {selectedEntry?.id === entry.id && Object.keys(entry.metadata).length > 0 && (
-                          <div className="mt-2 pt-2 border-t border-neutral-600">
-                            <p className="text-xs text-neutral-500 mb-1">Metadata:</p>
-                            <pre className="text-xs text-neutral-400 whitespace-pre-wrap break-all">
-                              {JSON.stringify(entry.metadata, null, 2)}
-                            </pre>
+                        {editingEntryId === entry.id ? (
+                          <div className="space-y-2 mt-2">
+                            <textarea
+                              value={formContent}
+                              onChange={(e) => setFormContent(e.target.value)}
+                              className="w-full bg-neutral-800 text-neutral-200 text-sm rounded p-2 min-h-[80px] resize-y border border-neutral-600 focus:border-amber-600 outline-none"
+                            />
+                            <Input
+                              value={formMetadata}
+                              onChange={(e) => setFormMetadata(e.target.value)}
+                              placeholder='Metadata (JSON)'
+                              className="bg-neutral-800 border-neutral-600 text-neutral-200 text-xs h-8"
+                            />
+                            <div className="flex gap-2 justify-end">
+                              <Button
+                                variant="ghost"
+                                size="sm"
+                                className="text-neutral-400"
+                                onClick={() => { setEditingEntryId(null); setFormContent(""); setFormMetadata("{}"); }}
+                              >
+                                Cancel
+                              </Button>
+                              <Button
+                                size="sm"
+                                className="bg-amber-600 hover:bg-amber-700 text-white"
+                                onClick={() => handleUpdateEntry(entry.id)}
+                                disabled={!formContent.trim()}
+                              >
+                                Save
+                              </Button>
+                            </div>
                           </div>
+                        ) : (
+                          <>
+                            <p className="text-sm text-neutral-200">
+                              {selectedEntry?.id === entry.id
+                                ? entry.content
+                                : truncate(entry.content, 200)}
+                            </p>
+                            {selectedEntry?.id === entry.id && Object.keys(entry.metadata).length > 0 && (
+                              <div className="mt-2 pt-2 border-t border-neutral-600">
+                                <p className="text-xs text-neutral-500 mb-1">Metadata:</p>
+                                <pre className="text-xs text-neutral-400 whitespace-pre-wrap break-all">
+                                  {JSON.stringify(entry.metadata, null, 2)}
+                                </pre>
+                              </div>
+                            )}
+                          </>
                         )}
                       </CardContent>
                     </Card>
