@@ -54,9 +54,52 @@ async def route_intent(state: AgentState, config: RunnableConfig) -> dict:
     return {"mode": mode, "need_recall": need_recall}
 
 
+async def _rewrite_query(user_msg: str, messages: list) -> str:
+    """Rewrite ambiguous/referential queries into self-contained form."""
+    recent = []
+    for m in messages[-6:]:
+        if hasattr(m, "content"):
+            role = "User" if isinstance(m, HumanMessage) else "Assistant"
+            recent.append(f"{role}: {m.content[:200]}")
+    context = "\n".join(recent)
+
+    prompt = (
+        "Given the conversation history, rewrite the user's latest message "
+        "as a self-contained search query. If the message is already self-contained, "
+        "return it unchanged. Only return the rewritten query, nothing else.\n\n"
+        f"Conversation history:\n{context}\n\n"
+        f"Latest message: {user_msg}"
+    )
+    try:
+        llm = get_llm(Configuration(), temperature=0.0)
+        response = await llm.ainvoke(prompt)
+        rewritten = response.content.strip().strip('"')
+        return rewritten if rewritten else user_msg
+    except Exception:
+        return user_msg
+
+
+async def _generate_hypothetical(query: str, config: Configuration) -> str:
+    """Generate a hypothetical answer for HyDE retrieval."""
+    hyde_prompt = (
+        "Answer this question in 1-2 short sentences. "
+        "Be specific with names and details. "
+        "If you don't know, guess based on the question context.\n\n"
+        f"Question: {query}"
+    )
+    try:
+        llm = get_llm(config, temperature=0.7)
+        response = await llm.ainvoke(hyde_prompt)
+        return response.content.strip()
+    except Exception:
+        return query
+
+
 async def recall_memory(state: AgentState, config: RunnableConfig) -> dict:
     """Search archival AND recall memory for content referenced by the user."""
     from datetime import datetime, timezone
+
+    configurable = Configuration.from_runnable_config(config)
 
     user_msg = ""
     for msg in reversed(state["messages"]):
@@ -74,9 +117,19 @@ async def recall_memory(state: AgentState, config: RunnableConfig) -> dict:
         import sys
         print(f"[memory_manager] Failed to save to recall: {e}", file=sys.stderr)
 
-    # Search both archival and recall in parallel
-    archival_task = asyncio.to_thread(search_archival, user_msg, 5)
-    recall_task = asyncio.to_thread(search_recall, user_msg, 5)
+    # Step 1: Query rewriting (if enabled)
+    search_query = user_msg
+    if configurable.memory_query_rewrite_enabled:
+        search_query = await _rewrite_query(user_msg, state["messages"])
+
+    # Step 2: HyDE (if enabled) — generate hypothetical answer for embedding
+    search_query_for_embed = search_query
+    if configurable.hyde_enabled:
+        search_query_for_embed = await _generate_hypothetical(search_query, configurable)
+
+    # Step 3: Search both archival and recall in parallel
+    archival_task = asyncio.to_thread(search_archival, search_query_for_embed, 5)
+    recall_task = asyncio.to_thread(search_recall, search_query, 5)
     archival_results_raw, recall_results_raw = await asyncio.gather(
         archival_task, recall_task
     )

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import uuid
 from datetime import datetime, timezone
 
@@ -17,6 +18,59 @@ logger = logging.getLogger(__name__)
 
 # Unified BM25 text search configuration
 _TS_CONFIG = "english"
+
+
+def _cosine_similarity(a: list[float], b: list[float]) -> float:
+    """Compute cosine similarity between two vectors."""
+    dot = sum(x * y for x, y in zip(a, b))
+    norm_a = sum(x * x for x in a) ** 0.5
+    norm_b = sum(x * x for x in b) ** 0.5
+    if norm_a == 0 or norm_b == 0:
+        return 0.0
+    return dot / (norm_a * norm_b)
+
+
+def _mmr_rerank(
+    query_embedding: list[float],
+    results: list[dict],
+    lambda_param: float = 0.5,
+    top_k: int | None = None,
+) -> list[dict]:
+    """Maximal Marginal Relevance: balance relevance and diversity.
+
+    Args:
+        query_embedding: The query vector.
+        results: List of dicts with 'content' and 'score' keys, sorted by score desc.
+        lambda_param: 1.0 = pure relevance, 0.0 = pure diversity.
+        top_k: Max results to return.
+    """
+    if len(results) <= 1:
+        return results
+
+    from agent.storage import get_embeddings
+
+    embeddings = get_embeddings()
+    doc_embeddings = [embeddings.embed_query(r["content"][:512]) for r in results]
+
+    selected = [0]
+    candidates = list(range(1, len(results)))
+
+    while candidates:
+        best_score, best_idx = float("-inf"), -1
+        for c in candidates:
+            relevance = results[c]["score"]
+            max_sim = max(
+                _cosine_similarity(doc_embeddings[c], doc_embeddings[s])
+                for s in selected
+            )
+            mmr_score = lambda_param * relevance - (1 - lambda_param) * max_sim
+            if mmr_score > best_score:
+                best_score, best_idx = mmr_score, c
+        selected.append(best_idx)
+        candidates.remove(best_idx)
+
+    ordered = [results[i] for i in selected]
+    return ordered[:top_k] if top_k else ordered
 
 
 # --- Archival Memory ---
@@ -36,7 +90,8 @@ def search_archival(query: str, limit: int = 5, alpha: float = 0.7) -> list[dict
 
     try:
         embeddings = get_embeddings()
-        query_embedding = Vector(embeddings.embed_query(query))
+        query_embedding_flat = embeddings.embed_query(query)
+        query_embedding = Vector(query_embedding_flat)
     except Exception as e:
         logger.error("Embedding failed: %s", e)
         return []
@@ -74,6 +129,11 @@ def search_archival(query: str, limit: int = 5, alpha: float = 0.7) -> list[dict
         results = rerank(query, results, top_k=int(limit))
     except Exception:
         results = results[: int(limit)]
+
+    # MMR deduplication
+    if os.getenv("MMR_ENABLED", "false").lower() in ("true", "1", "yes") and len(results) > 1:
+        lambda_p = float(os.getenv("MMR_LAMBDA", "0.5"))
+        results = _mmr_rerank(query_embedding_flat, results, lambda_param=lambda_p, top_k=int(limit))
 
     return results
 

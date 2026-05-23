@@ -78,6 +78,22 @@ class Configuration(BaseModel):
         default=1500,
         metadata={"description": "Maximum chunk size in characters for semantic chunking."},
     )
+    hyde_enabled: bool = Field(
+        default=False,
+        metadata={"description": "Enable HyDE (Hypothetical Document Embeddings) for archival search."},
+    )
+    memory_query_rewrite_enabled: bool = Field(
+        default=False,
+        metadata={"description": "Rewrite ambiguous queries using conversation history before memory search."},
+    )
+    mmr_enabled: bool = Field(
+        default=False,
+        metadata={"description": "Enable MMR deduplication in search results."},
+    )
+    mmr_lambda: float = Field(
+        default=0.5,
+        metadata={"description": "MMR lambda parameter: 1.0=pure relevance, 0.0=pure diversity."},
+    )
 
     @classmethod
     def from_runnable_config(
