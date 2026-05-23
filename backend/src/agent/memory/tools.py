@@ -311,6 +311,7 @@ def create_memory_tools(
             source: str,
             source_type: Literal["url", "text"] = "url",
             chunk_size: int = 800,
+            chunk_strategy: Literal["fixed", "semantic"] = "fixed",
         ) -> str:
             """Ingest a document into the knowledge base.
 
@@ -321,9 +322,10 @@ def create_memory_tools(
                 source: The URL to fetch, or the plain text content to ingest.
                 source_type: "url" to fetch from a web URL, "text" for plain text input.
                 chunk_size: Target chunk size in characters (default 800).
+                chunk_strategy: "fixed" for size-based chunking, "semantic" for embedding-based.
             """
             import httpx
-            from agent.storage.ingestion import chunk_text
+            from agent.storage.ingestion import chunk_text, chunk_text_semantic
 
             if source_type == "url":
                 try:
@@ -345,7 +347,11 @@ def create_memory_tools(
             if not text or len(text.strip()) < 50:
                 return "No meaningful text content to ingest."
 
-            chunks = chunk_text(text, chunk_size=chunk_size, source=doc_label)
+            if chunk_strategy == "semantic":
+                from agent.storage import get_embeddings
+                chunks = chunk_text_semantic(text, embeddings=get_embeddings(), source=doc_label)
+            else:
+                chunks = chunk_text(text, chunk_size=chunk_size, source=doc_label)
             if not chunks:
                 return "Failed to chunk document."
 

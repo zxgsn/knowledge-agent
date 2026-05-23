@@ -534,6 +534,14 @@ async def ingest_document_node(state: AgentState, config: RunnableConfig) -> dic
 
     from agent.storage.ingestion import ingest_pdf, ingest_text, ingest_url
 
+    cfg = Configuration.from_runnable_config(config)
+    chunk_params = dict(
+        strategy=cfg.chunk_strategy,
+        similarity_threshold=cfg.chunk_similarity_threshold,
+        min_chunk_size=cfg.chunk_min_size,
+        max_chunk_size=cfg.chunk_max_size,
+    )
+
     doc_source = state.get("doc_source", "")
     source_type = state.get("doc_source_type", "url")
     pdf_filename = ""
@@ -570,12 +578,12 @@ async def ingest_document_node(state: AgentState, config: RunnableConfig) -> dic
     try:
         if source_type == "pdf":
             pdf_bytes = base64.b64decode(doc_source)
-            chunks = await ingest_pdf(pdf_bytes, filename=pdf_filename or "document.pdf")
+            chunks = await ingest_pdf(pdf_bytes, filename=pdf_filename or "document.pdf", **chunk_params)
             if not chunks:
                 return {"ingest_result": f"Failed to extract text from PDF: {pdf_filename}"}
             doc_label = pdf_filename or "document.pdf"
         elif source_type == "url":
-            title, chunks = await ingest_url(doc_source)
+            title, chunks = await ingest_url(doc_source, **chunk_params)
             if not chunks:
                 return {"ingest_result": f"Failed to extract text from URL: {doc_source}"}
             doc_label = title
@@ -584,6 +592,7 @@ async def ingest_document_node(state: AgentState, config: RunnableConfig) -> dic
                 content=doc_source,
                 source_name="manual_text",
                 source_type="text",
+                **chunk_params,
             )
             if not chunks:
                 return {"ingest_result": "No text content to ingest."}

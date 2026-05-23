@@ -12,7 +12,7 @@ A personal knowledge agent with persistent memory, built on LangGraph. It can re
 - **Hybrid Search + Re-ranking** — Archival retrieval combines vector similarity (DashScope embeddings) with BM25 keyword matching (PostgreSQL tsvector + GIN index), followed by cross-encoder re-ranking (`BAAI/bge-reranker-v2-m3`) for improved result ordering
 - **Core Memory Auto-Compression** — Blocks approaching their character limit are automatically distilled by the LLM, preserving key facts while staying within bounds
 - **Deep Research** — Multi-loop web search with automatic gap analysis and follow-up queries
-- **Document Ingestion** — Import URLs, PDFs, or plain text; automatic chunking and vectorization
+- **Document Ingestion** — Import URLs, PDFs, or plain text; automatic chunking and vectorization. Supports two strategies: fixed-size splitting (paragraph-first, 800-char chunks) and **semantic chunking** (embedding-based boundary detection using cosine similarity between adjacent sentences)
 - **Intent Routing** — LLM-classified modes: Chat, Research, Recall, Memory Edit, Ingest
 - **Chat with Knowledge Retrieval** — Chat mode automatically searches Archival Memory for relevant context before generating a response
 - **Persistent Knowledge** — Research findings are stored in PostgreSQL + pgvector and survive across sessions
@@ -70,7 +70,12 @@ ingest_document node
   ├── Text    → direct processing
   └── File    → read content
   ↓
-chunk_text() — paragraph → sentence → character splitting with overlap
+Chunking (configurable strategy)
+  ├── "fixed"    → chunk_text(): paragraph → sentence → character splitting (800 chars, 100 overlap)
+  └── "semantic" → chunk_text_semantic(): sentence split → embed → cosine similarity → break at low-sim points
+                   ├── Merge segments below min_chunk_size (200 chars)
+                   ├── Split segments above max_chunk_size (1500 chars)
+                   └── Add overlap between consecutive chunks
   ↓
 Documents table (full text) + ArchivalMemory (chunks with document_id)
   ↓
@@ -78,6 +83,8 @@ DashScope Embedding batch vectorization
   ↓
 PostgreSQL + pgvector (dedup via UNIQUE INDEX on title+source)
 ```
+
+**Semantic Chunking** detects topic shifts by computing cosine similarity between adjacent sentence embeddings. When similarity drops below a threshold (default 0.5), a chunk boundary is inserted. This produces chunks that are semantically coherent rather than arbitrarily sized. Configure via environment variables: `CHUNK_STRATEGY=semantic`, `CHUNK_SIMILARITY_THRESHOLD=0.5`, `CHUNK_MIN_SIZE=200`, `CHUNK_MAX_SIZE=1500`.
 
 ## Tech Stack
 
@@ -344,8 +351,7 @@ knowledge-agent/
 - [x] **Document Library Output** — Full document storage (documents table) with document-level browsing, namespace filtering, and dedup via unique index. Ingested documents show title, chunk count, and expandable full content.
 - [x] **Conversation History Sidebar** — Left panel with thread listing via LangGraph SDK, supporting thread switching and new chat creation.
 - [x] **Smart Deduplication** — `manage_archival.py smart-dedup` command: cosine similarity candidate filtering (≥0.85) with batched LLM judgment (5 pairs/call) and auto-merge for high-confidence duplicates (≥0.95).
-- [ ] **Feishu Integration** — Direct integration with Feishu (Lark) for bidirectional sync: ingest Feishu docs into the knowledge base, and export agent findings back to Feishu documents.
-- [ ] **Improved Text Chunking** — Current chunking uses paragraph-first splitting with fixed size (800 chars) and character-level overlap. Issues: no semantic boundary awareness, poor handling of tables/lists/code blocks, fixed chunk size ignores content structure. Explore semantic chunking (e.g. embedding-based boundary detection) or agentic chunking (LLM-guided splitting) for better retrieval quality.
+- [x] **Improved Text Chunking** — Added embedding-based semantic chunking (`chunk_text_semantic`) as an alternative to fixed-size splitting. Computes cosine similarity between adjacent sentence embeddings and breaks at semantic boundaries (low similarity points). Configurable threshold, min/max chunk size, and overlap. Selectable via `CHUNK_STRATEGY=semantic` env var or `strategy` parameter.
 - [ ] **Memory Pipeline Optimization** — Current mem0-style pipeline (extract → dedup → upsert) runs after every response turn, adding latency. Fact extraction quality depends heavily on LLM capability; dedup uses a fixed cosine threshold (0.8) which may miss near-duplicates or over-merge distinct facts. Explore: batched/async pipeline execution, adaptive dedup thresholds, fact confidence scoring, and conflict resolution strategies beyond simple merge/skip.
 
 ## Acknowledgments

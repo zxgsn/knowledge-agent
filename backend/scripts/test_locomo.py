@@ -24,8 +24,10 @@ from datetime import datetime, timezone
 
 if sys.platform == "win32":
     asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
-    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
-    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8", errors="replace")
+    if hasattr(sys.stdout, "buffer"):
+        sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
+    if hasattr(sys.stderr, "buffer"):
+        sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8", errors="replace")
     sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "src")))
 
 import psycopg
@@ -154,6 +156,7 @@ def _normalize_sample(row: dict, sample_id: str) -> dict | None:
                 "question": q.get("question", q.get("query", "")),
                 "answer": str(answer),
                 "question_type": cat,
+                "evidence": q.get("evidence", []),
             })
 
     if not normalized_sessions:
@@ -543,6 +546,65 @@ def answer_in_results(answer: str, results: list[dict], k: int) -> bool:
     return False
 
 
+def build_evidence_index(samples: list[dict]) -> dict[str, str]:
+    """Build mapping from evidence references (D{session}:{turn}) to turn content.
+
+    Evidence format: "D2:3" means session 2 (1-indexed), turn 3 (0-indexed).
+    """
+    index = {}
+    for sample in samples:
+        for session_idx, session in enumerate(sample["conversation"]):
+            for turn_idx, turn in enumerate(session.get("dialogue", [])):
+                if not isinstance(turn, dict):
+                    continue
+                speaker = turn.get("speaker", turn.get("role", "unknown"))
+                utterance = turn.get("utterance", turn.get("content", turn.get("text", "")))
+                if utterance and utterance.strip():
+                    # D{session_number}:{turn_index} — session_number is 1-indexed
+                    ref = f"D{session_idx + 1}:{turn_idx}"
+                    index[ref] = f"[{speaker}] {utterance}"
+    return index
+
+
+def answer_in_results_with_evidence(
+    answer: str, results: list[dict], k: int,
+    evidence: list[str] | None = None,
+    evidence_index: dict[str, str] | None = None,
+) -> bool:
+    """Check if answer (or evidence turns) appear in top-K results.
+
+    Falls back to evidence matching when answer is empty.
+    """
+    # Standard answer matching
+    if answer and answer.strip():
+        return answer_in_results(answer, results, k)
+
+    # Evidence-based matching for empty-answer questions (e.g. event_summary)
+    if evidence and evidence_index:
+        evidence_contents = []
+        for ref in evidence:
+            if isinstance(ref, str) and ref in evidence_index:
+                evidence_contents.append(evidence_index[ref].lower())
+        if not evidence_contents:
+            return False
+
+        for r in results[:k]:
+            content_lower = r["content"].lower()
+            for ev_content in evidence_contents:
+                # Check if the evidence turn is contained in the result
+                # (context windows contain multiple turns)
+                if ev_content in content_lower:
+                    return True
+                # Token overlap between evidence and result
+                ev_tokens = set(re.findall(r"\w+", ev_content))
+                result_tokens = set(re.findall(r"\w+", content_lower))
+                if len(ev_tokens) >= 3:
+                    overlap = len(ev_tokens & result_tokens)
+                    if overlap / len(ev_tokens) > 0.6:
+                        return True
+    return False
+
+
 def llm_judge_answer(
     question: str, answer: str, results: list[dict], k: int, llm
 ) -> bool:
@@ -595,13 +657,19 @@ def evaluate_recall(
     k_values: list[int] | None = None,
     answer_checker=None,
     search_fn=None,
+    evidence_index: dict[str, str] | None = None,
 ) -> dict:
-    """Evaluate Recall@K for all questions.
+    """Evaluate Recall@K and MRR for all questions.
 
     Args:
-        answer_checker: optional callable(question, answer, results, k) -> bool.
+        answer_checker: optional callable(question, answer, results, k, evidence) -> bool.
         search_fn: optional callable(question, namespace, limit) -> list[dict].
             Defaults to search_archival. Use functools.partial to bind an LLM for HyDE.
+        evidence_index: mapping from evidence refs to turn content.
+
+    Returns:
+        dict[qtype][k] = {"hits": int, "total": int}
+        Also stores MRR data in results["_mrr"][qtype] = {"rr_sum": float, "total": int}
     """
     if k_values is None:
         k_values = [1, 3, 5, 10]
@@ -614,17 +682,28 @@ def evaluate_recall(
         for q in sample["questions"]:
             all_questions.append(q)
 
-    checker = answer_checker or _default_checker
+    if answer_checker is not None:
+        checker = answer_checker
+    elif evidence_index:
+        def _evidence_checker(question, answer, results, k, evidence=None, _ei=evidence_index):
+            return answer_in_results_with_evidence(answer, results, k, evidence, _ei)
+        checker = _evidence_checker
+    else:
+        checker = _default_checker
     searcher = search_fn or search_archival
 
     t0 = time.time()
 
-    for q in tqdm(all_questions, desc="  Evaluating R@K", unit="q"):
+    for q in tqdm(all_questions, desc="  Evaluating R@K+MRR", unit="q"):
         qtype = q.get("question_type", "unknown")
         question = q.get("question", "")
         answer = q.get("answer", "")
+        evidence = q.get("evidence", [])
 
-        if not question or not answer:
+        if not question:
+            continue
+        # Skip only if both answer AND evidence are empty
+        if not answer.strip() and not evidence:
             continue
 
         if qtype not in results:
@@ -635,9 +714,25 @@ def evaluate_recall(
 
         search_results = searcher(question, namespace, limit=max_k)
 
+        # Recall@K
         for k in k_values:
-            if checker(question, answer, search_results, k):
+            if checker(question, answer, search_results, k, evidence=evidence):
                 results[qtype][k]["hits"] += 1
+
+        # MRR: find rank of first hit across all results
+        first_rank = 0
+        for rank_idx, r in enumerate(search_results[:max_k]):
+            if checker(question, answer, [r], 1, evidence=evidence):
+                first_rank = rank_idx + 1
+                break
+        rr = 1.0 / first_rank if first_rank > 0 else 0.0
+
+        if "_mrr" not in results:
+            results["_mrr"] = {}
+        if qtype not in results["_mrr"]:
+            results["_mrr"][qtype] = {"rr_sum": 0.0, "total": 0}
+        results["_mrr"][qtype]["rr_sum"] += rr
+        results["_mrr"][qtype]["total"] += 1
 
     elapsed = time.time() - t0
     print(f"  Done in {elapsed:.1f}s")
@@ -645,23 +740,31 @@ def evaluate_recall(
 
 
 def print_results(results: dict, title: str) -> None:
-    """Print recall results as a formatted table."""
+    """Print recall and MRR results as a formatted table."""
     k_values = set()
-    for qtype_data in results.values():
+    for qtype, qtype_data in results.items():
+        if qtype == "_mrr":
+            continue
         k_values.update(qtype_data.keys())
     k_values = sorted(k_values)
 
+    has_mrr = "_mrr" in results
+
     print(f"\n  {title}")
-    print(f"  {'Question Type':<20}", end="")
+    header = f"  {'Question Type':<20}"
     for k in k_values:
-        print(f"{'R@' + str(k):>8}", end="")
-    print()
-    print("  " + "-" * (20 + 8 * len(k_values)))
+        header += f"{'R@' + str(k):>8}"
+    if has_mrr:
+        header += f"{'MRR':>8}"
+    print(header)
+    print("  " + "-" * (20 + 8 * len(k_values) + (8 if has_mrr else 0)))
 
     total_hits = {k: 0 for k in k_values}
     total_count = {k: 0 for k in k_values}
+    total_rr_sum = 0.0
+    total_mrr_count = 0
 
-    for qtype in sorted(results.keys()):
+    for qtype in sorted(k for k in results.keys() if k != "_mrr"):
         print(f"  {qtype:<20}", end="")
         for k in k_values:
             data = results[qtype].get(k, {"hits": 0, "total": 1})
@@ -669,13 +772,22 @@ def print_results(results: dict, title: str) -> None:
             print(f"{recall:>7.1%}", end=" ")
             total_hits[k] += data["hits"]
             total_count[k] += data["total"]
+        if has_mrr and qtype in results["_mrr"]:
+            mrr_data = results["_mrr"][qtype]
+            mrr = mrr_data["rr_sum"] / mrr_data["total"] if mrr_data["total"] > 0 else 0
+            print(f"{mrr:>7.1%}", end=" ")
+            total_rr_sum += mrr_data["rr_sum"]
+            total_mrr_count += mrr_data["total"]
         print()
 
-    print("  " + "-" * (20 + 8 * len(k_values)))
+    print("  " + "-" * (20 + 8 * len(k_values) + (8 if has_mrr else 0)))
     print(f"  {'Overall':<20}", end="")
     for k in k_values:
         recall = total_hits[k] / total_count[k] if total_count[k] > 0 else 0
         print(f"{recall:>7.1%}", end=" ")
+    if has_mrr and total_mrr_count > 0:
+        overall_mrr = total_rr_sum / total_mrr_count
+        print(f"{overall_mrr:>7.1%}", end=" ")
     print()
 
 
@@ -686,6 +798,7 @@ def print_results(results: dict, title: str) -> None:
 def compare_strategies(samples: list[dict]) -> None:
     """Run evaluation under 4 strategies and compare."""
     k_values = [1, 3, 5, 10]
+    ev_index = build_evidence_index(samples)
 
     print("\n" + "=" * 70)
     print("  LoCoMo Memory Pipeline Evaluation")
@@ -696,7 +809,7 @@ def compare_strategies(samples: list[dict]) -> None:
     ns = "locomo_baseline"
     clean_namespace(ns)
     ingest_raw_turns(samples, namespace=ns)
-    results_baseline = evaluate_recall(samples, ns, k_values)
+    results_baseline = evaluate_recall(samples, ns, k_values, evidence_index=ev_index)
     print_results(results_baseline, "Baseline: Raw Turns")
 
     # Strategy 2: Session context windows
@@ -704,7 +817,7 @@ def compare_strategies(samples: list[dict]) -> None:
     ns = "locomo_context"
     clean_namespace(ns)
     ingest_session_context(samples, namespace=ns)
-    results_context = evaluate_recall(samples, ns, k_values)
+    results_context = evaluate_recall(samples, ns, k_values, evidence_index=ev_index)
     print_results(results_context, "Session Context Windows")
 
     # Strategy 3: Extracted facts
@@ -712,7 +825,7 @@ def compare_strategies(samples: list[dict]) -> None:
     ns = "locomo_extracted"
     clean_namespace(ns)
     ingest_extracted_facts(samples, namespace=ns)
-    results_extracted = evaluate_recall(samples, ns, k_values)
+    results_extracted = evaluate_recall(samples, ns, k_values, evidence_index=ev_index)
     print_results(results_extracted, "Extracted Facts")
 
     # Strategy 4: Hybrid (context + extracted)
@@ -721,18 +834,18 @@ def compare_strategies(samples: list[dict]) -> None:
     clean_namespace(ns)
     ingest_session_context(samples, namespace=ns)
     ingest_extracted_facts(samples, namespace=ns)
-    results_hybrid = evaluate_recall(samples, ns, k_values)
+    results_hybrid = evaluate_recall(samples, ns, k_values, evidence_index=ev_index)
     print_results(results_hybrid, "Hybrid: Context + Extracted")
 
     # Summary
-    print("\n" + "=" * 70)
-    print("  Summary: Overall Recall@K Comparison")
-    print("=" * 70)
+    print("\n" + "=" * 78)
+    print("  Summary: Overall Recall@K + MRR Comparison")
+    print("=" * 78)
     print(f"  {'Strategy':<25}", end="")
     for k in k_values:
         print(f"{'R@' + str(k):>8}", end="")
-    print()
-    print("  " + "-" * (25 + 8 * len(k_values)))
+    print(f"{'MRR':>8}")
+    print("  " + "-" * (25 + 8 * len(k_values) + 8))
 
     strategies = [
         ("Baseline (raw)", results_baseline),
@@ -743,7 +856,9 @@ def compare_strategies(samples: list[dict]) -> None:
     for label, res in strategies:
         total_hits = {k: 0 for k in k_values}
         total_count = {k: 0 for k in k_values}
-        for qtype_data in res.values():
+        for qtype, qtype_data in res.items():
+            if qtype == "_mrr":
+                continue
             for k in k_values:
                 data = qtype_data.get(k, {"hits": 0, "total": 0})
                 total_hits[k] += data["hits"]
@@ -752,9 +867,15 @@ def compare_strategies(samples: list[dict]) -> None:
         for k in k_values:
             recall = total_hits[k] / total_count[k] if total_count[k] > 0 else 0
             print(f"{recall:>7.1%}", end=" ")
+        # MRR
+        if "_mrr" in res:
+            rr_sum = sum(d["rr_sum"] for d in res["_mrr"].values())
+            mrr_count = sum(d["total"] for d in res["_mrr"].values())
+            mrr = rr_sum / mrr_count if mrr_count > 0 else 0
+            print(f"{mrr:>7.1%}", end=" ")
         print()
 
-    print("=" * 70)
+    print("=" * 78)
 
 
 # ============================================================
@@ -802,8 +923,9 @@ if __name__ == "__main__":
 
     # Build answer checker
     checker = None
+    ev_index = build_evidence_index(samples)
     if args.llm_judge:
-        def checker(question, answer, results, k, _llm=llm):
+        def checker(question, answer, results, k, _llm=llm, evidence=None):
             return llm_judge_answer(question, answer, results, k, _llm)
         print("  Using LLM judge for answer matching.")
 
@@ -813,26 +935,26 @@ if __name__ == "__main__":
         ns = "locomo_baseline"
         clean_namespace(ns)
         ingest_raw_turns(samples, namespace=ns)
-        results = evaluate_recall(samples, ns, answer_checker=checker, search_fn=search_fn)
+        results = evaluate_recall(samples, ns, answer_checker=checker, search_fn=search_fn, evidence_index=ev_index)
         print_results(results, "Baseline: Raw Turns")
     elif args.strategy == "context":
         ns = "locomo_context"
         clean_namespace(ns)
         ingest_session_context(samples, namespace=ns)
-        results = evaluate_recall(samples, ns, answer_checker=checker, search_fn=search_fn)
+        results = evaluate_recall(samples, ns, answer_checker=checker, search_fn=search_fn, evidence_index=ev_index)
         print_results(results, "Session Context Windows")
     elif args.strategy == "extracted":
         ns = "locomo_extracted"
         clean_namespace(ns)
         ingest_extracted_facts(samples, namespace=ns)
-        results = evaluate_recall(samples, ns, answer_checker=checker, search_fn=search_fn)
+        results = evaluate_recall(samples, ns, answer_checker=checker, search_fn=search_fn, evidence_index=ev_index)
         print_results(results, "Extracted Facts")
     elif args.strategy == "hybrid":
         ns = "locomo_hybrid"
         clean_namespace(ns)
         ingest_session_context(samples, namespace=ns)
         ingest_extracted_facts(samples, namespace=ns)
-        results = evaluate_recall(samples, ns, answer_checker=checker, search_fn=search_fn)
+        results = evaluate_recall(samples, ns, answer_checker=checker, search_fn=search_fn, evidence_index=ev_index)
         print_results(results, "Hybrid: Context + Extracted")
 
     print(f"\nTotal time: {time.time() - t_start:.1f}s")

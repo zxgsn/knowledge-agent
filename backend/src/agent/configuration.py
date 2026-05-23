@@ -58,6 +58,22 @@ class Configuration(BaseModel):
         default=True,
         metadata={"description": "Enable cross-encoder re-ranking."},
     )
+    chunk_strategy: str = Field(
+        default="fixed",
+        metadata={"description": "Chunking strategy: 'fixed' or 'semantic'."},
+    )
+    chunk_similarity_threshold: float = Field(
+        default=0.5,
+        metadata={"description": "Cosine similarity threshold for semantic chunking boundaries."},
+    )
+    chunk_min_size: int = Field(
+        default=200,
+        metadata={"description": "Minimum chunk size in characters for semantic chunking."},
+    )
+    chunk_max_size: int = Field(
+        default=1500,
+        metadata={"description": "Maximum chunk size in characters for semantic chunking."},
+    )
 
     @classmethod
     def from_runnable_config(
