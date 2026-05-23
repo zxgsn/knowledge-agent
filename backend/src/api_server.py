@@ -18,7 +18,8 @@ app = FastAPI(title="Knowledge Agent Library API")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
+    allow_origins=["http://localhost:5173", "http://127.0.0.1:5173",
+                   "http://localhost:2024", "http://127.0.0.1:2024"],
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -370,3 +371,72 @@ def list_recall_entries(
         for r in rows
     ]
     return RecallListResponse(entries=entries, total=total)
+
+
+# --- Delete endpoints ---
+
+
+@app.delete("/api/documents/{doc_id}")
+def delete_document(doc_id: str):
+    """Delete a document and all its associated archival chunks."""
+    from fastapi import HTTPException
+
+    from agent.storage import get_conn
+
+    with get_conn() as conn:
+        # Delete associated chunks first
+        chunk_result = conn.execute(
+            "DELETE FROM archival_memory WHERE document_id = %s", (doc_id,)
+        )
+        # Delete the document itself
+        doc_result = conn.execute(
+            "DELETE FROM documents WHERE id = %s", (doc_id,)
+        )
+        conn.commit()
+
+    if doc_result.rowcount == 0:
+        raise HTTPException(status_code=404, detail="Document not found")
+
+    return {
+        "deleted": True,
+        "document_id": doc_id,
+        "chunks_deleted": chunk_result.rowcount,
+    }
+
+
+@app.delete("/api/archival/entries/{entry_id}")
+def delete_archival_entry(entry_id: str):
+    """Delete a single archival memory entry."""
+    from fastapi import HTTPException
+
+    from agent.storage import get_conn
+
+    with get_conn() as conn:
+        result = conn.execute(
+            "DELETE FROM archival_memory WHERE id = %s", (entry_id,)
+        )
+        conn.commit()
+
+    if result.rowcount == 0:
+        raise HTTPException(status_code=404, detail="Entry not found")
+
+    return {"deleted": True, "entry_id": entry_id}
+
+
+@app.delete("/api/recall/entries/{entry_id}")
+def delete_recall_entry(entry_id: str):
+    """Delete a single recall memory entry."""
+    from fastapi import HTTPException
+
+    from agent.storage import get_conn
+
+    with get_conn() as conn:
+        result = conn.execute(
+            "DELETE FROM recall_memory WHERE id = %s", (entry_id,)
+        )
+        conn.commit()
+
+    if result.rowcount == 0:
+        raise HTTPException(status_code=404, detail="Entry not found")
+
+    return {"deleted": True, "entry_id": entry_id}

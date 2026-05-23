@@ -197,6 +197,7 @@ knowledge-agent/
 ## Roadmap
 
 - [ ] **Memory Pipeline Optimization** — Current pipeline adds latency per turn. Explore batched/async execution, adaptive dedup thresholds, fact confidence scoring.
+- [ ] **Manual Library CRUD** — Add create/edit support for manual entries in Document Library UI. Backend: POST/PUT endpoints for archival entries. Frontend: add entry form + inline editing in Manual tab.
 - [ ] **Feishu Integration** — Bidirectional sync: import Feishu docs into knowledge base, export research results to Feishu.
 
 ## Acknowledgments

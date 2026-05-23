@@ -387,7 +387,7 @@ async def ingest_document_node(state: AgentState, config: RunnableConfig) -> dic
                 original_content = msg.content
 
                 # Check for PDF upload from frontend
-                pdf_match = re.match(
+                pdf_match = re.search(
                     r"\[UPLOAD_PDF:(.+?)\](.+?)\[/UPLOAD_PDF\]",
                     original_content,
                     re.DOTALL,

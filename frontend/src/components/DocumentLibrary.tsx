@@ -6,7 +6,7 @@ import { Badge } from "@/components/ui/badge";
 import { Card, CardContent } from "@/components/ui/card";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { ScrollArea } from "@/components/ui/scroll-area";
-import { ArrowLeft, Search, BookOpen, MessageSquare, RefreshCw, FileText, ChevronDown, ChevronRight } from "lucide-react";
+import { ArrowLeft, Search, BookOpen, MessageSquare, RefreshCw, FileText, ChevronDown, ChevronRight, Trash2 } from "lucide-react";
 
 interface ArchivalEntry {
   id: string;
@@ -55,6 +55,10 @@ const NAMESPACE_COLORS: Record<string, string> = {
   default: "bg-neutral-600",
 };
 
+const API_BASE = import.meta.env.DEV
+  ? "http://localhost:8000"
+  : "";
+
 function timeAgo(dateStr: string | null): string {
   if (!dateStr) return "";
   const date = new Date(dateStr);
@@ -91,8 +95,8 @@ export function DocumentLibrary() {
   const fetchStats = useCallback(async () => {
     try {
       const [archivalRes, recallRes] = await Promise.all([
-        fetch("/api/archival/stats"),
-        fetch("/api/recall/stats"),
+        fetch(`${API_BASE}/api/archival/stats`),
+        fetch(`${API_BASE}/api/recall/stats`),
       ]);
       if (archivalRes.ok) setStats(await archivalRes.json());
       if (recallRes.ok) setRecallStats(await recallRes.json());
@@ -104,7 +108,7 @@ export function DocumentLibrary() {
     try {
       const params = new URLSearchParams({ limit: "100", offset: "0" });
       if (search) params.set("search", search);
-      const res = await fetch(`/api/documents?${params}`);
+      const res = await fetch(`${API_BASE}/api/documents?${params}`);
       if (res.ok) {
         const data = await res.json();
         setDocuments(data.documents);
@@ -116,7 +120,7 @@ export function DocumentLibrary() {
 
   const fetchDocDetail = useCallback(async (docId: string) => {
     try {
-      const res = await fetch(`/api/documents/${docId}`);
+      const res = await fetch(`${API_BASE}/api/documents/${docId}`);
       if (res.ok) {
         setSelectedDoc(await res.json());
       }
@@ -129,7 +133,7 @@ export function DocumentLibrary() {
       if (activeTab === "recall") {
         const params = new URLSearchParams({ limit: "100", offset: "0" });
         if (search) params.set("search", search);
-        const res = await fetch(`/api/recall/entries?${params}`);
+        const res = await fetch(`${API_BASE}/api/recall/entries?${params}`);
         if (res.ok) {
           const data = await res.json();
           setRecallEntries(data.entries);
@@ -143,8 +147,8 @@ export function DocumentLibrary() {
         const recParams = new URLSearchParams({ limit: "50", offset: "0" });
         if (search) { archParams.set("search", search); recParams.set("search", search); }
         const [archRes, recRes] = await Promise.all([
-          fetch(`/api/archival/entries?${archParams}`),
-          fetch(`/api/recall/entries?${recParams}`),
+          fetch(`${API_BASE}/api/archival/entries?${archParams}`),
+          fetch(`${API_BASE}/api/recall/entries?${recParams}`),
         ]);
         let archTotal = 0;
         if (archRes.ok) {
@@ -164,7 +168,7 @@ export function DocumentLibrary() {
         const params = new URLSearchParams({ limit: "100", offset: "0" });
         params.set("namespace", activeTab);
         if (search) params.set("search", search);
-        const res = await fetch(`/api/archival/entries?${params}`);
+        const res = await fetch(`${API_BASE}/api/archival/entries?${params}`);
         if (res.ok) {
           const data = await res.json();
           setEntries(data.entries);
@@ -211,6 +215,57 @@ export function DocumentLibrary() {
       setSelectedDoc(null);
     } else {
       fetchDocDetail(doc.id);
+    }
+  };
+
+  const handleDeleteDocument = async (e: React.MouseEvent, docId: string, title: string) => {
+    e.stopPropagation();
+    if (!window.confirm(`Delete "${title}" and all its chunks?`)) return;
+    try {
+      const res = await fetch(`${API_BASE}/api/documents/${docId}`, { method: "DELETE" });
+      if (res.ok || res.status === 404) {
+        setSelectedDoc(null);
+        fetchDocuments();
+        fetchStats();
+      } else {
+        alert(`Delete failed (${res.status}): ${await res.text()}`);
+      }
+    } catch (err) {
+      alert(`Delete failed: ${err}`);
+    }
+  };
+
+  const handleDeleteArchival = async (e: React.MouseEvent, entryId: string) => {
+    e.stopPropagation();
+    if (!window.confirm("Delete this entry?")) return;
+    try {
+      const res = await fetch(`${API_BASE}/api/archival/entries/${entryId}`, { method: "DELETE" });
+      if (res.ok || res.status === 404) {
+        setEntries((prev) => prev.filter((e) => e.id !== entryId));
+        setSelectedEntry(null);
+        fetchStats();
+      } else {
+        alert(`Delete failed (${res.status}): ${await res.text()}`);
+      }
+    } catch (err) {
+      alert(`Delete failed: ${err}`);
+    }
+  };
+
+  const handleDeleteRecall = async (e: React.MouseEvent, entryId: string) => {
+    e.stopPropagation();
+    if (!window.confirm("Delete this recall entry?")) return;
+    try {
+      const res = await fetch(`${API_BASE}/api/recall/entries/${entryId}`, { method: "DELETE" });
+      if (res.ok || res.status === 404) {
+        setRecallEntries((prev) => prev.filter((e) => e.id !== entryId));
+        setSelectedEntry(null);
+        fetchStats();
+      } else {
+        alert(`Delete failed (${res.status}): ${await res.text()}`);
+      }
+    } catch (err) {
+      alert(`Delete failed: ${err}`);
     }
   };
 
@@ -304,6 +359,15 @@ export function DocumentLibrary() {
                             <span className="text-xs text-neutral-500 ml-auto">
                               {timeAgo(doc.created_at)}
                             </span>
+                            <Button
+                              variant="ghost"
+                              size="icon"
+                              className="h-6 w-6 text-neutral-500 hover:text-red-400"
+                              onClick={(e) => handleDeleteDocument(e, doc.id, doc.title)}
+                              title="Delete document"
+                            >
+                              <Trash2 className="w-3.5 h-3.5" />
+                            </Button>
                             {selectedDoc?.id === doc.id
                               ? <ChevronDown className="w-4 h-4 text-neutral-400" />
                               : <ChevronRight className="w-4 h-4 text-neutral-400" />}
@@ -372,6 +436,15 @@ export function DocumentLibrary() {
                             <span className="text-xs text-neutral-500 ml-auto">
                               {timeAgo(entry.created_at)}
                             </span>
+                            <Button
+                              variant="ghost"
+                              size="icon"
+                              className="h-6 w-6 text-neutral-500 hover:text-red-400"
+                              onClick={(e) => handleDeleteRecall(e, entry.id)}
+                              title="Delete entry"
+                            >
+                              <Trash2 className="w-3.5 h-3.5" />
+                            </Button>
                           </div>
                           <p className="text-sm text-neutral-200">
                             {selectedEntry?.id === entry.id
@@ -413,6 +486,15 @@ export function DocumentLibrary() {
                           <span className="text-xs text-neutral-500 ml-auto">
                             {timeAgo(entry.created_at)}
                           </span>
+                          <Button
+                            variant="ghost"
+                            size="icon"
+                            className="h-6 w-6 text-neutral-500 hover:text-red-400"
+                            onClick={(e) => handleDeleteArchival(e, entry.id)}
+                            title="Delete entry"
+                          >
+                            <Trash2 className="w-3.5 h-3.5" />
+                          </Button>
                         </div>
                         <p className="text-sm text-neutral-200">
                           {selectedEntry?.id === entry.id
@@ -453,6 +535,15 @@ export function DocumentLibrary() {
                           <span className="text-xs text-neutral-500 ml-auto">
                             {timeAgo(entry.created_at)}
                           </span>
+                          <Button
+                            variant="ghost"
+                            size="icon"
+                            className="h-6 w-6 text-neutral-500 hover:text-red-400"
+                            onClick={(e) => handleDeleteRecall(e, entry.id)}
+                            title="Delete entry"
+                          >
+                            <Trash2 className="w-3.5 h-3.5" />
+                          </Button>
                         </div>
                         <p className="text-sm text-neutral-200">
                           {selectedEntry?.id === entry.id

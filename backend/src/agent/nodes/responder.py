@@ -59,15 +59,22 @@ async def respond(state: AgentState, config: RunnableConfig) -> dict:
         for msg in state["messages"][-20:]:
             if isinstance(msg, HumanMessage):
                 content = msg.content
-                # Replace PDF base64 data with a short summary
+                # Strip PDF base64 data — replace tag with short summary
                 import re as _re
-                pdf_match = _re.match(
-                    r"\[UPLOAD_PDF:(.+?)\].+?\[/UPLOAD_PDF\]",
+                pdf_match = _re.search(
+                    r"\[UPLOAD_PDF:(.+?)\]",
                     content,
-                    _re.DOTALL,
                 )
                 if pdf_match:
-                    content = f"[Uploaded PDF: {pdf_match.group(1)}. Document has been ingested into archival memory.]"
+                    doc_name = pdf_match.group(1)
+                    remaining = _re.sub(
+                        r"\[UPLOAD_PDF:.+?\].+?\[/UPLOAD_PDF\]",
+                        "",
+                        content,
+                        flags=_re.DOTALL,
+                    ).strip()
+                    suffix = f"[Uploaded PDF: {doc_name}. Document has been ingested into archival memory.]"
+                    content = f"{remaining}\n\n{suffix}" if remaining else suffix
                 messages_for_llm.append({"role": "user", "content": content})
             elif isinstance(msg, AIMessage) and msg.content:
                 messages_for_llm.append({"role": "assistant", "content": msg.content})

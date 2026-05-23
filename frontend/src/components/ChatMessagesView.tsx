@@ -143,11 +143,14 @@ interface HumanMessageBubbleProps {
 
 // Format user message for display (hide PDF base64 data)
 function formatUserMessage(content: string): string {
-  const pdfMatch = content.match(
-    /^\[UPLOAD_PDF:(.+?)\].+?\[\/UPLOAD_PDF\]$/s
-  );
+  // Strip PDF base64 tag from anywhere in the message
+  const stripped = content
+    .replace(/\[UPLOAD_PDF:.+?\].+?\[\/UPLOAD_PDF\]/gs, "")
+    .trim();
+  const pdfMatch = content.match(/\[UPLOAD_PDF:(.+?)\]/);
   if (pdfMatch) {
-    return `📄 Uploaded: **${pdfMatch[1]}**`;
+    const prefix = stripped ? `${stripped}\n\n` : "";
+    return `${prefix}📄 Uploaded: **${pdfMatch[1]}**`;
   }
   return content;
 }
