@@ -21,9 +21,8 @@ from langchain_openai import ChatOpenAI
 from agent.configuration import Configuration
 from agent.prompts import (
     CONSOLIDATION_MERGE_PROMPT,
-    FACT_CONFLICT_PROMPT,
-    FACT_EXTRACTION_PROMPT,
-    MEMORY_UPDATE_PROMPT,
+    MEMORY_JUDGMENT_PROMPT,
+    SELECTIVE_EXTRACTION_PROMPT,
 )
 from agent.state import AgentState
 
@@ -222,140 +221,150 @@ def _sync_get_existing_memories(
 # --- Graph nodes ---
 
 async def memory_pipeline(state: AgentState, config: RunnableConfig) -> dict:
-    """Extract facts from the latest exchange and store in archival memory.
+    """Selective memory capture: judge → search existing → extract → upsert.
 
-    Uses a single-step LLM call with existing memory context to decide
-    ADD/UPDATE/DELETE/NOOP operations (mem0-style).
-
-    NOTE: Fact extraction is temporarily disabled — LoCoMo evaluation showed
-    that extracted facts (R@10=14.6%) perform worse than raw turns (R@10=21.1%)
-    and multi-turn context windows (R@10=42.7%). Re-enable when a better
-    extraction strategy (e.g. entity-relationship triples) is implemented.
+    Two-step LLM pipeline:
+    1. MEMORY_JUDGMENT_PROMPT — lightweight check if the turn is worth remembering
+    2. SELECTIVE_EXTRACTION_PROMPT — extract ADD/UPDATE/DELETE ops with existing memory context
     """
     turn_count = state.get("turn_count", 0) + 1
-    return {"turn_count": turn_count}
+    configurable = Configuration.from_runnable_config(config)
 
-    # --- Disabled: fact extraction pipeline ---
-    # configurable = Configuration.from_runnable_config(config)
-    #
-    # # Extract last user + assistant messages
-    # messages = state["messages"]
-    # user_msg = ""
-    # assistant_msg = ""
-    # for msg in reversed(messages):
-    #     if isinstance(msg, AIMessage) and msg.content and not assistant_msg:
-    #         assistant_msg = msg.content
-    #     elif isinstance(msg, HumanMessage) and msg.content and not user_msg:
-    #         user_msg = msg.content
-    #     if user_msg and assistant_msg:
-    #         break
-    #
-    # if not user_msg or not assistant_msg:
-    #     return {"turn_count": turn_count}
-    #
-    # llm = _get_llm(configurable, temperature=0.0)
-    #
-    # # Search existing memories for context
-    # search_query = user_msg[:200]
-    # existing = await asyncio.to_thread(
-    #     _sync_get_existing_memories, search_query, "conversation_facts", 10
-    # )
-    #
-    # if existing:
-    #     existing_text = "\n".join(
-    #         f"- [id: {m['id']}] {m['content']}" for m in existing
-    #     )
-    #     update_prompt = MEMORY_UPDATE_PROMPT.format(
-    #         existing_memories=existing_text,
-    #         user_message=user_msg,
-    #         assistant_message=assistant_msg,
-    #     )
-    #     response = await llm.ainvoke(update_prompt)
-    #     parsed = _parse_json(response.content)
-    #     operations = parsed.get("memory", [])
-    # else:
-    #     extraction_prompt = FACT_EXTRACTION_PROMPT.format(
-    #         user_message=user_msg, assistant_message=assistant_msg
-    #     )
-    #     response = await llm.ainvoke(extraction_prompt)
-    #     parsed = _parse_json(response.content)
-    #     facts = parsed.get("facts", [])
-    #     operations = [
-    #         {"id": f"new_{i}", "text": f, "event": "ADD"}
-    #         for i, f in enumerate(facts)
-    #     ]
-    #
-    # if not operations:
-    #     return {
-    #         "turn_count": turn_count,
-    #         "memory_operations": [{
-    #             "type": "pipeline_extract",
-    #             "facts_count": 0,
-    #             "timestamp": datetime.now(timezone.utc).isoformat(),
-    #         }],
-    #     }
-    #
-    # stored_count = 0
-    # updated_count = 0
-    # deleted_count = 0
-    # skipped_count = 0
-    # fact_log = []
-    #
-    # for op in operations:
-    #     event = op.get("event", "ADD").upper()
-    #     text = op.get("text", "").strip()
-    #     op_id = op.get("id", "")
-    #
-    #     if event == "ADD" and text:
-    #         entry_id = await asyncio.to_thread(
-    #             _sync_put_fact_to_archival,
-    #             text,
-    #             {"source": "conversation", "turn": turn_count},
-    #         )
-    #         stored_count += 1
-    #         fact_log.append({"fact": text, "action": "stored", "entry_id": entry_id})
-    #
-    #     elif event == "UPDATE" and text and op_id:
-    #         old_memory = op.get("old_memory", "")
-    #         await asyncio.to_thread(
-    #             _sync_update_archival,
-    #             op_id,
-    #             text,
-    #             {"source": "memory_pipeline", "old_memory": old_memory[:80]},
-    #         )
-    #         updated_count += 1
-    #         fact_log.append({"fact": text, "action": "updated", "existing_id": op_id})
-    #
-    #     elif event == "DELETE" and op_id:
-    #         await asyncio.to_thread(_sync_delete_archival, op_id)
-    #         deleted_count += 1
-    #         fact_log.append({"fact": op.get("old_memory", ""), "action": "deleted", "entry_id": op_id})
-    #
-    #     elif event == "NONE":
-    #         skipped_count += 1
-    #         fact_log.append({"fact": text, "action": "skipped", "reason": "unchanged"})
-    #
-    #     else:
-    #         skipped_count += 1
-    #         fact_log.append({"fact": text, "action": "skipped", "reason": f"unknown_event:{event}"})
-    #
-    # memory_ops = [{
-    #     "type": "pipeline_extract",
-    #     "facts_count": len(operations),
-    #     "stored": stored_count,
-    #     "updated": updated_count,
-    #     "deleted": deleted_count,
-    #     "skipped": skipped_count,
-    #     "existing_memories": len(existing),
-    #     "turn_count": turn_count,
-    #     "timestamp": datetime.now(timezone.utc).isoformat(),
-    # }]
-    #
-    # return {
-    #     "turn_count": turn_count,
-    #     "pipeline_facts": fact_log,
-    #     "memory_operations": memory_ops,
-    # }
+    if not configurable.memory_selective_enabled:
+        return {"turn_count": turn_count}
+
+    # Extract last user + assistant messages
+    messages = state["messages"]
+    user_msg = ""
+    assistant_msg = ""
+    for msg in reversed(messages):
+        if isinstance(msg, AIMessage) and msg.content and not assistant_msg:
+            assistant_msg = msg.content
+        elif isinstance(msg, HumanMessage) and msg.content and not user_msg:
+            user_msg = msg.content
+        if user_msg and assistant_msg:
+            break
+
+    if not user_msg or not assistant_msg:
+        return {"turn_count": turn_count}
+
+    llm = _get_llm(configurable, temperature=0.0)
+
+    # Step 1: Judge if this turn is worth remembering
+    judgment_prompt = MEMORY_JUDGMENT_PROMPT.format(
+        user_message=user_msg,
+        assistant_message=assistant_msg,
+    )
+    try:
+        judgment_response = await llm.ainvoke(judgment_prompt)
+        judgment = _parse_json(judgment_response.content)
+    except Exception:
+        return {"turn_count": turn_count}
+
+    if not judgment.get("memorable", False):
+        return {
+            "turn_count": turn_count,
+            "memory_operations": [{
+                "type": "pipeline_judgment",
+                "memorable": False,
+                "reason": judgment.get("reason", ""),
+                "turn_count": turn_count,
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+            }],
+        }
+
+    # Step 2: Search existing memories for context
+    search_query = user_msg[:200]
+    existing = await asyncio.to_thread(
+        _sync_get_existing_memories, search_query, "conversation_facts", 10
+    )
+
+    existing_text = "None"
+    if existing:
+        existing_text = "\n".join(
+            f"- [id: {m['id']}] {m['content']}" for m in existing
+        )
+
+    # Step 3: Extract memory operations
+    extraction_prompt = SELECTIVE_EXTRACTION_PROMPT.format(
+        existing_memories=existing_text,
+        user_message=user_msg,
+        assistant_message=assistant_msg,
+    )
+    try:
+        response = await llm.ainvoke(extraction_prompt)
+        parsed = _parse_json(response.content)
+    except Exception:
+        return {"turn_count": turn_count}
+
+    operations = parsed.get("memory", [])
+    if not operations:
+        return {
+            "turn_count": turn_count,
+            "memory_operations": [{
+                "type": "pipeline_extract",
+                "facts_count": 0,
+                "turn_count": turn_count,
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+            }],
+        }
+
+    # Step 4: Execute operations
+    stored_count = 0
+    updated_count = 0
+    deleted_count = 0
+    skipped_count = 0
+    fact_log = []
+
+    for op in operations:
+        event = op.get("event", "ADD").upper()
+        text = op.get("text", "").strip()
+        op_id = op.get("id", "")
+
+        if event == "ADD" and text:
+            entry_id = await asyncio.to_thread(
+                _sync_put_fact_to_archival,
+                text,
+                {"source": "conversation", "turn": turn_count},
+            )
+            stored_count += 1
+            fact_log.append({"fact": text, "action": "stored", "entry_id": entry_id})
+
+        elif event == "UPDATE" and text and op_id:
+            old_memory = op.get("old_memory", "")
+            await asyncio.to_thread(
+                _sync_update_archival,
+                op_id,
+                text,
+                {"source": "memory_pipeline", "old_memory": old_memory[:80]},
+            )
+            updated_count += 1
+            fact_log.append({"fact": text, "action": "updated", "existing_id": op_id})
+
+        elif event == "DELETE" and op_id:
+            await asyncio.to_thread(_sync_delete_archival, op_id)
+            deleted_count += 1
+            fact_log.append({"fact": op.get("old_memory", ""), "action": "deleted", "entry_id": op_id})
+
+        else:
+            skipped_count += 1
+            fact_log.append({"fact": text, "action": "skipped", "reason": f"event:{event}"})
+
+    return {
+        "turn_count": turn_count,
+        "pipeline_facts": fact_log,
+        "memory_operations": [{
+            "type": "pipeline_extract",
+            "facts_count": len(operations),
+            "stored": stored_count,
+            "updated": updated_count,
+            "deleted": deleted_count,
+            "skipped": skipped_count,
+            "existing_memories": len(existing),
+            "turn_count": turn_count,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        }],
+    }
 
 
 def _sync_cleanup_namespace(namespace: str, max_age_days: int) -> int:

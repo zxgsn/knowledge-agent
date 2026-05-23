@@ -132,21 +132,26 @@ Research findings:
 Respond with ONLY the summary text to store (no JSON, no formatting).
 """
 
-FACT_EXTRACTION_PROMPT = """Extract discrete facts from this conversation exchange. Each fact must be a single, self-contained statement useful for future reference.
-
-Rules:
-- Extract ONLY new information revealed in this exchange (not greetings, not restating known info)
-- Each fact is one sentence, standalone (no pronouns like "he", "it", "this" without referent)
-- Include specific names, dates, numbers, preferences, decisions, relationships
-- Do NOT extract opinions, emotions, or transient states
-- Do NOT extract information that is general knowledge (e.g. "Paris is the capital of France")
-- If no meaningful facts are present, return an empty list
+MEMORY_JUDGMENT_PROMPT = """Decide whether this conversation exchange contains information worth remembering long-term.
 
 User: {user_message}
 Assistant: {assistant_message}
 
-Respond with ONLY a JSON object: {{"facts": ["fact1", "fact2", ...]}}
-Return {{"facts": []}} if no extractable facts.
+Worth remembering (memorable=true):
+- Explicit preferences ("I prefer X", "I use Y", "I don't like Z")
+- Corrections to previously held information ("actually, it's X not Y")
+- Important decisions or commitments ("I decided to X", "I'll start doing Y")
+- Specific personal facts (names, dates, locations, relationships, numbers)
+- Action items or plans the user wants to follow up on
+
+NOT worth remembering (memorable=false):
+- Greetings, small talk, pleasantries
+- General knowledge questions and answers
+- Opinions, emotions, or transient states
+- Information already obvious from context
+- Repetitions of known information
+
+Respond with ONLY a JSON object: {{"memorable": true/false, "reason": "brief explanation"}}
 """
 
 FACT_CONFLICT_PROMPT = """A new fact conflicts with or duplicates an existing memory.
@@ -162,23 +167,23 @@ Respond with ONLY a JSON object:
 {{"decision": "update|skip", "merged": "merged fact text (only if update)", "reason": "..."}}
 """
 
-MEMORY_UPDATE_PROMPT = """You are a memory manager. Given existing memories and a new conversation, decide which memories to ADD, UPDATE, DELETE, or leave unchanged (NONE).
+SELECTIVE_EXTRACTION_PROMPT = """Extract memory operations from this conversation, considering existing memories.
 
 ## Existing Memories
 {existing_memories}
 
-## New Conversation
+## Conversation
 User: {user_message}
 Assistant: {assistant_message}
 
 ## Rules
 - **ADD**: New information not covered by any existing memory. Generate a new ID like "new_0", "new_1".
-- **UPDATE**: The conversation provides new info that changes or refines an existing memory. Keep the same ID, write the updated text. Set "old_memory" to the original text.
-- **DELETE**: The conversation contradicts or invalidates an existing memory (e.g. user moved cities, changed jobs, revoked a preference). Keep the same ID.
-- **NONE**: The existing memory is still accurate, no change needed. Do NOT include NONE entries in output.
-- Each memory text should be a self-contained factual statement (one sentence, include specific names/dates/numbers).
+- **UPDATE**: The conversation corrects or refines an existing memory. Keep the same ID, write the updated text. Set "old_memory" to the original text.
+- **DELETE**: The conversation contradicts or invalidates an existing memory. Keep the same ID.
+- Each memory text must be a self-contained factual statement (one sentence, include specific names/dates/numbers).
+- Preserve the user's original phrasing where possible.
 - Do NOT extract greetings, opinions, emotions, or general knowledge.
-- If the conversation contains no memory-worthy information, return {{"memory": []}}.
+- If no memory-worthy information, return {{"memory": []}}.
 
 Respond with ONLY a JSON object:
 {{"memory": [

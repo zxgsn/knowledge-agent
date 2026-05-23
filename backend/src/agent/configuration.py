@@ -42,6 +42,10 @@ class Configuration(BaseModel):
         default=0.8,
         metadata={"description": "Cosine similarity threshold for fact deduplication."},
     )
+    memory_selective_enabled: bool = Field(
+        default=True,
+        metadata={"description": "Enable selective memory capture (judgment + extraction)."},
+    )
     archival_cleanup_days: int = Field(
         default=30,
         metadata={"description": "Days before ingested entries are eligible for cleanup."},
