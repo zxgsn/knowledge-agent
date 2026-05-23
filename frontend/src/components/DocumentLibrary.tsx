@@ -89,6 +89,7 @@ export function DocumentLibrary() {
   const [stats, setStats] = useState<NamespaceStats[]>([]);
   const [recallStats, setRecallStats] = useState({ message_count: 0, thread_count: 0 });
   const [selectedEntry, setSelectedEntry] = useState<ArchivalEntry | RecallEntry | null>(null);
+  const [selectedChunkId, setSelectedChunkId] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [total, setTotal] = useState(0);
 
@@ -213,7 +214,9 @@ export function DocumentLibrary() {
   const handleDocClick = (doc: DocumentSummary) => {
     if (selectedDoc?.id === doc.id) {
       setSelectedDoc(null);
+      setSelectedChunkId(null);
     } else {
+      setSelectedChunkId(null);
       fetchDocDetail(doc.id);
     }
   };
@@ -394,10 +397,30 @@ export function DocumentLibrary() {
                                     {selectedDoc.chunks.map((chunk, i) => (
                                       <div
                                         key={chunk.id}
-                                        className="text-xs text-neutral-300 bg-neutral-800 rounded p-2"
+                                        className="text-xs text-neutral-300 bg-neutral-800 rounded p-2 cursor-pointer hover:bg-neutral-750 transition-colors"
+                                        onClick={(e) => {
+                                          e.stopPropagation();
+                                          setSelectedChunkId(selectedChunkId === chunk.id ? null : chunk.id);
+                                        }}
                                       >
-                                        <span className="text-neutral-500 mr-2">#{i + 1}</span>
-                                        {truncate(chunk.content, 150)}
+                                        <div className="flex items-start gap-2">
+                                          <span className="text-neutral-500 shrink-0">#{i + 1}</span>
+                                          <span className="flex-1">
+                                            {selectedChunkId === chunk.id
+                                              ? chunk.content
+                                              : truncate(chunk.content, 150)}
+                                          </span>
+                                          <span className="text-neutral-600 shrink-0">
+                                            {selectedChunkId === chunk.id ? "▲" : "▼"}
+                                          </span>
+                                        </div>
+                                        {selectedChunkId === chunk.id && Object.keys(chunk.metadata).length > 0 && (
+                                          <div className="mt-2 pt-2 border-t border-neutral-700">
+                                            <pre className="text-xs text-neutral-400 whitespace-pre-wrap break-all">
+                                              {JSON.stringify(chunk.metadata, null, 2)}
+                                            </pre>
+                                          </div>
+                                        )}
                                       </div>
                                     ))}
                                   </div>
