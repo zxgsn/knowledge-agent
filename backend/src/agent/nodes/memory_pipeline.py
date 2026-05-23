@@ -8,214 +8,29 @@ Implements mem0-style pipeline on top of the existing three-layer architecture:
 from __future__ import annotations
 
 import asyncio
-import json
-import re
-import uuid
 from datetime import datetime, timezone
 
-import httpx
 from langchain_core.messages import AIMessage, HumanMessage
 from langchain_core.runnables import RunnableConfig
-from langchain_openai import ChatOpenAI
 
 from agent.configuration import Configuration
+from agent.db import (
+    cleanup_excess,
+    cleanup_namespace,
+    delete_archival,
+    get_all_facts,
+    get_existing_memories,
+    put_to_archival,
+    search_archival_for_dedup,
+    update_archival,
+)
 from agent.prompts import (
     CONSOLIDATION_MERGE_PROMPT,
     MEMORY_JUDGMENT_PROMPT,
     SELECTIVE_EXTRACTION_PROMPT,
 )
 from agent.state import AgentState
-
-
-# --- Helpers ---
-
-def _get_llm(config: Configuration, temperature: float = 0.0) -> ChatOpenAI:
-    return ChatOpenAI(
-        model=config.llm_model,
-        base_url=config.llm_base_url,
-        api_key=config.llm_api_key,
-        temperature=temperature,
-        http_async_client=httpx.AsyncClient(proxy=None),
-    )
-
-
-def _parse_json(text: str) -> dict:
-    match = re.search(r"```(?:json)?\s*(.*?)\s*```", text, re.DOTALL)
-    if match:
-        text = match.group(1)
-    try:
-        return json.loads(text)
-    except json.JSONDecodeError:
-        return {}
-
-
-# --- Sync DB helpers (run in asyncio.to_thread) ---
-
-def _sync_search_archival_for_dedup(
-    query: str, namespace: str = "conversation_facts", limit: int = 3
-) -> list[dict]:
-    """Search archival for semantically similar facts. Pure cosine similarity."""
-    import psycopg
-    from pgvector import Vector
-    from pgvector.psycopg import register_vector
-    from agent.storage import get_db_url, get_embeddings
-
-    try:
-        embeddings = get_embeddings()
-        query_embedding = Vector(embeddings.embed_query(query))
-    except Exception:
-        return []
-
-    try:
-        conn = psycopg.connect(get_db_url(), connect_timeout=5)
-    except Exception:
-        return []
-
-    register_vector(conn)
-    rows = conn.execute(
-        """
-        SELECT id, content, metadata,
-               1 - (embedding <=> %s::vector) AS score
-        FROM archival_memory
-        WHERE namespace = %s
-          AND 1 - (embedding <=> %s::vector) > 0.5
-        ORDER BY score DESC
-        LIMIT %s
-        """,
-        (query_embedding, namespace, query_embedding, int(limit)),
-    ).fetchall()
-    conn.close()
-
-    results = []
-    for row in rows:
-        score = float(row[3])
-        meta = row[2] if isinstance(row[2], dict) else json.loads(row[2])
-        results.append({"id": row[0], "content": row[1], "metadata": meta, "score": score})
-    return results
-
-
-def _sync_put_fact_to_archival(content: str, metadata: dict, namespace: str = "conversation_facts") -> str:
-    """Store a new fact in archival memory."""
-    import psycopg
-    from pgvector import Vector
-    from pgvector.psycopg import register_vector
-    from agent.storage import get_db_url, get_embeddings
-
-    embeddings = get_embeddings()
-    entry_id = str(uuid.uuid4())
-    metadata["timestamp"] = datetime.now(timezone.utc).isoformat()
-    embedding = Vector(embeddings.embed_query(content))
-
-    conn = psycopg.connect(get_db_url(), connect_timeout=5)
-    register_vector(conn)
-    conn.execute(
-        "INSERT INTO archival_memory (id, namespace, content, metadata, embedding) "
-        "VALUES (%s, %s, %s, %s, %s) ON CONFLICT (id) DO NOTHING",
-        (entry_id, namespace, content, json.dumps(metadata), embedding),
-    )
-    conn.commit()
-    conn.close()
-    return entry_id
-
-
-def _sync_update_archival(entry_id: str, content: str, metadata: dict) -> None:
-    """Update an existing archival entry's content and embedding."""
-    import psycopg
-    from pgvector import Vector
-    from pgvector.psycopg import register_vector
-    from agent.storage import get_db_url, get_embeddings
-
-    embeddings = get_embeddings()
-    embedding = Vector(embeddings.embed_query(content))
-    metadata["timestamp"] = datetime.now(timezone.utc).isoformat()
-    metadata["updated_by"] = "memory_pipeline"
-
-    conn = psycopg.connect(get_db_url(), connect_timeout=5)
-    register_vector(conn)
-    conn.execute(
-        "UPDATE archival_memory SET content = %s, metadata = %s, embedding = %s WHERE id = %s",
-        (content, json.dumps(metadata), embedding, entry_id),
-    )
-    conn.commit()
-    conn.close()
-
-
-def _sync_delete_archival(entry_id: str) -> bool:
-    """Delete an archival entry by ID."""
-    import psycopg
-    from agent.storage import get_db_url
-
-    conn = psycopg.connect(get_db_url(), connect_timeout=5)
-    result = conn.execute("DELETE FROM archival_memory WHERE id = %s", (entry_id,))
-    conn.commit()
-    conn.close()
-    return result.rowcount > 0
-
-
-def _sync_get_all_facts(namespace: str = "conversation_facts", limit: int = 500) -> list[dict]:
-    """Fetch all facts in a namespace for consolidation."""
-    import psycopg
-    from pgvector.psycopg import register_vector
-    from agent.storage import get_db_url
-
-    try:
-        conn = psycopg.connect(get_db_url(), connect_timeout=5)
-    except Exception:
-        return []
-
-    register_vector(conn)
-    rows = conn.execute(
-        "SELECT id, content, metadata, embedding::text FROM archival_memory "
-        "WHERE namespace = %s ORDER BY created_at DESC LIMIT %s",
-        (namespace, int(limit)),
-    ).fetchall()
-    conn.close()
-
-    results = []
-    for row in rows:
-        meta = row[2] if isinstance(row[2], dict) else json.loads(row[2])
-        results.append({"id": row[0], "content": row[1], "metadata": meta, "embedding_text": row[3]})
-    return results
-
-
-def _sync_get_existing_memories(
-    query: str, namespace: str = "conversation_facts", limit: int = 10
-) -> list[dict]:
-    """Get existing memories relevant to a query for the update prompt."""
-    import psycopg
-    from pgvector import Vector
-    from pgvector.psycopg import register_vector
-    from agent.storage import get_db_url, get_embeddings
-
-    try:
-        embeddings = get_embeddings()
-        query_embedding = Vector(embeddings.embed_query(query))
-    except Exception:
-        return []
-
-    try:
-        conn = psycopg.connect(get_db_url(), connect_timeout=5)
-    except Exception:
-        return []
-
-    register_vector(conn)
-    rows = conn.execute(
-        """
-        SELECT id, content, metadata
-        FROM archival_memory
-        WHERE namespace = %s
-        ORDER BY embedding <=> %s::vector
-        LIMIT %s
-        """,
-        (namespace, query_embedding, int(limit)),
-    ).fetchall()
-    conn.close()
-
-    results = []
-    for row in rows:
-        meta = row[2] if isinstance(row[2], dict) else json.loads(row[2])
-        results.append({"id": row[0], "content": row[1], "metadata": meta})
-    return results
+from agent.utils import get_llm, parse_json
 
 
 # --- Graph nodes ---
@@ -248,7 +63,7 @@ async def memory_pipeline(state: AgentState, config: RunnableConfig) -> dict:
     if not user_msg or not assistant_msg:
         return {"turn_count": turn_count}
 
-    llm = _get_llm(configurable, temperature=0.0)
+    llm = get_llm(configurable, temperature=0.0)
 
     # Step 1: Judge if this turn is worth remembering
     judgment_prompt = MEMORY_JUDGMENT_PROMPT.format(
@@ -257,7 +72,7 @@ async def memory_pipeline(state: AgentState, config: RunnableConfig) -> dict:
     )
     try:
         judgment_response = await llm.ainvoke(judgment_prompt)
-        judgment = _parse_json(judgment_response.content)
+        judgment = parse_json(judgment_response.content)
     except Exception:
         return {"turn_count": turn_count}
 
@@ -276,7 +91,7 @@ async def memory_pipeline(state: AgentState, config: RunnableConfig) -> dict:
     # Step 2: Search existing memories for context
     search_query = user_msg[:200]
     existing = await asyncio.to_thread(
-        _sync_get_existing_memories, search_query, "conversation_facts", 10
+        get_existing_memories, search_query, "conversation_facts", 10
     )
 
     existing_text = "None"
@@ -293,7 +108,7 @@ async def memory_pipeline(state: AgentState, config: RunnableConfig) -> dict:
     )
     try:
         response = await llm.ainvoke(extraction_prompt)
-        parsed = _parse_json(response.content)
+        parsed = parse_json(response.content)
     except Exception:
         return {"turn_count": turn_count}
 
@@ -323,8 +138,9 @@ async def memory_pipeline(state: AgentState, config: RunnableConfig) -> dict:
 
         if event == "ADD" and text:
             entry_id = await asyncio.to_thread(
-                _sync_put_fact_to_archival,
+                put_to_archival,
                 text,
+                "conversation_facts",
                 {"source": "conversation", "turn": turn_count},
             )
             stored_count += 1
@@ -333,7 +149,7 @@ async def memory_pipeline(state: AgentState, config: RunnableConfig) -> dict:
         elif event == "UPDATE" and text and op_id:
             old_memory = op.get("old_memory", "")
             await asyncio.to_thread(
-                _sync_update_archival,
+                update_archival,
                 op_id,
                 text,
                 {"source": "memory_pipeline", "old_memory": old_memory[:80]},
@@ -342,7 +158,7 @@ async def memory_pipeline(state: AgentState, config: RunnableConfig) -> dict:
             fact_log.append({"fact": text, "action": "updated", "existing_id": op_id})
 
         elif event == "DELETE" and op_id:
-            await asyncio.to_thread(_sync_delete_archival, op_id)
+            await asyncio.to_thread(delete_archival, op_id)
             deleted_count += 1
             fact_log.append({"fact": op.get("old_memory", ""), "action": "deleted", "entry_id": op_id})
 
@@ -367,58 +183,6 @@ async def memory_pipeline(state: AgentState, config: RunnableConfig) -> dict:
     }
 
 
-def _sync_cleanup_namespace(namespace: str, max_age_days: int) -> int:
-    """Delete entries older than max_age_days from a namespace. Returns count deleted."""
-    import psycopg
-    from agent.storage import get_db_url
-
-    try:
-        conn = psycopg.connect(get_db_url(), connect_timeout=5)
-    except Exception:
-        return 0
-
-    result = conn.execute(
-        "DELETE FROM archival_memory WHERE namespace = %s "
-        "AND created_at < NOW() - INTERVAL '%s days'",
-        (namespace, max_age_days),
-    )
-    conn.commit()
-    deleted = result.rowcount
-    conn.close()
-    return deleted
-
-
-def _sync_cleanup_excess(namespace: str, max_entries: int) -> int:
-    """Keep only the newest max_entries in a namespace. Returns count deleted."""
-    import psycopg
-    from agent.storage import get_db_url
-
-    try:
-        conn = psycopg.connect(get_db_url(), connect_timeout=5)
-    except Exception:
-        return 0
-
-    count = conn.execute(
-        "SELECT COUNT(*) FROM archival_memory WHERE namespace = %s", (namespace,)
-    ).fetchone()[0]
-
-    if count <= max_entries:
-        conn.close()
-        return 0
-
-    conn.execute(
-        "DELETE FROM archival_memory WHERE id IN ("
-        "  SELECT id FROM archival_memory WHERE namespace = %s "
-        "  ORDER BY created_at ASC LIMIT %s"
-        ")",
-        (namespace, count - max_entries),
-    )
-    conn.commit()
-    deleted = count - max_entries
-    conn.close()
-    return deleted
-
-
 async def _consolidate_namespace(
     namespace: str,
     llm,
@@ -426,7 +190,7 @@ async def _consolidate_namespace(
     max_entries: int = 500,
 ) -> dict:
     """Dedup and merge similar entries in a namespace via embedding clustering."""
-    facts = await asyncio.to_thread(_sync_get_all_facts, namespace, max_entries)
+    facts = await asyncio.to_thread(get_all_facts, namespace, max_entries)
 
     if len(facts) < 2:
         return {"namespace": namespace, "action": "skipped", "reason": "too_few", "count": len(facts)}
@@ -491,14 +255,14 @@ async def _consolidate_namespace(
             merged_text = max(cluster_facts, key=len)
 
         for cid in cluster_ids:
-            await asyncio.to_thread(_sync_delete_archival, cid)
+            await asyncio.to_thread(delete_archival, cid)
             deleted_count += 1
 
         await asyncio.to_thread(
-            _sync_put_fact_to_archival,
+            put_to_archival,
             merged_text,
+            "conversation_facts",
             {"source": "consolidation", "merged_from": cluster_ids, "original_count": len(members)},
-            namespace,
         )
         merged_count += 1
 
@@ -513,7 +277,7 @@ async def _consolidate_namespace(
 async def consolidate_memory(state: AgentState, config: RunnableConfig) -> dict:
     """Periodic consolidation: dedup, merge, and cleanup across all managed namespaces."""
     configurable = Configuration.from_runnable_config(config)
-    merge_llm = _get_llm(configurable, temperature=0.2)
+    merge_llm = get_llm(configurable, temperature=0.2)
 
     ops = []
     t0 = datetime.now(timezone.utc)
@@ -534,8 +298,8 @@ async def consolidate_memory(state: AgentState, config: RunnableConfig) -> dict:
     cleanup_days = configurable.archival_cleanup_days
     max_entries = configurable.archival_max_entries
 
-    cleaned = await asyncio.to_thread(_sync_cleanup_namespace, "ingested", cleanup_days)
-    excess = await asyncio.to_thread(_sync_cleanup_excess, "ingested", max_entries)
+    cleaned = await asyncio.to_thread(cleanup_namespace, "ingested", cleanup_days)
+    excess = await asyncio.to_thread(cleanup_excess, "ingested", max_entries)
     if cleaned or excess:
         ops.append({
             "type": "cleanup",

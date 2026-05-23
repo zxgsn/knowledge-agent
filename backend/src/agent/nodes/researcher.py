@@ -2,15 +2,11 @@
 
 from __future__ import annotations
 
-import json
 import os
-import re
 
 import httpx
 from langchain_core.messages import AIMessage, HumanMessage
-from langchain_openai import ChatOpenAI
 from langchain_core.runnables import RunnableConfig
-from langchain_openai import ChatOpenAI
 
 from agent.configuration import Configuration
 from agent.prompts import (
@@ -19,27 +15,7 @@ from agent.prompts import (
     WEB_SEARCHER_PROMPT,
 )
 from agent.state import AgentState
-
-
-def _parse_json(text: str) -> dict:
-    """Extract JSON from LLM response, handling markdown code blocks."""
-    match = re.search(r"```(?:json)?\s*(.*?)\s*```", text, re.DOTALL)
-    if match:
-        text = match.group(1)
-    try:
-        return json.loads(text)
-    except json.JSONDecodeError:
-        return {}
-
-
-def _get_llm(config: Configuration, temperature: float = 0.7) -> ChatOpenAI:
-    return ChatOpenAI(
-        model=config.llm_model,
-        base_url=config.llm_base_url,
-        api_key=config.llm_api_key,
-        temperature=temperature,
-        http_async_client=httpx.AsyncClient(proxy=None),
-    )
+from agent.utils import get_llm, parse_json
 
 
 async def _tavily_search(query: str, api_key: str) -> list[dict]:
@@ -61,7 +37,7 @@ async def _tavily_search(query: str, api_key: str) -> list[dict]:
 async def generate_query(state: AgentState, config: RunnableConfig) -> dict:
     """Generate search queries from the user's message."""
     configurable = Configuration.from_runnable_config(config)
-    llm = _get_llm(configurable, temperature=0.7)
+    llm = get_llm(configurable, temperature=0.7)
 
     research_topic = _get_research_topic(state["messages"])
     prompt = QUERY_WRITER_PROMPT.format(
@@ -70,7 +46,7 @@ async def generate_query(state: AgentState, config: RunnableConfig) -> dict:
     )
 
     response = await llm.ainvoke(prompt)
-    parsed = _parse_json(response.content)
+    parsed = parse_json(response.content)
     queries = parsed.get("queries", [research_topic])
 
     return {
@@ -82,7 +58,7 @@ async def generate_query(state: AgentState, config: RunnableConfig) -> dict:
 async def web_research(state: dict, config: RunnableConfig) -> dict:
     """Perform web search for a single query and summarize results."""
     configurable = Configuration.from_runnable_config(config)
-    llm = _get_llm(configurable, temperature=0.3)
+    llm = get_llm(configurable, temperature=0.3)
 
     query = state["search_query"]
     api_key = os.getenv("TAVILY_API_KEY", "")
@@ -113,7 +89,7 @@ async def web_research(state: dict, config: RunnableConfig) -> dict:
 async def reflection(state: AgentState, config: RunnableConfig) -> dict:
     """Analyze gathered research and identify gaps."""
     configurable = Configuration.from_runnable_config(config)
-    llm = _get_llm(configurable, temperature=0.3)
+    llm = get_llm(configurable, temperature=0.3)
 
     research_topic = _get_research_topic(state["messages"])
     summaries = "\n\n---\n\n".join(state.get("web_research_result", []))
@@ -124,7 +100,7 @@ async def reflection(state: AgentState, config: RunnableConfig) -> dict:
     )
 
     response = await llm.ainvoke(prompt)
-    parsed = _parse_json(response.content)
+    parsed = parse_json(response.content)
 
     return {
         "is_sufficient": parsed.get("is_sufficient", True),

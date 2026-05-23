@@ -5,17 +5,16 @@ from __future__ import annotations
 import asyncio
 import sys
 
-import httpx
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langchain_core.runnables import RunnableConfig
-from langchain_openai import ChatOpenAI
 
 from agent.configuration import Configuration
+from agent.db import save_to_recall
 from agent.memory.core_memory import CoreMemory
 from agent.memory.tools import create_memory_tools
-from agent.nodes.memory_manager import _sync_save_to_recall
 from agent.prompts import ANSWER_PROMPT, SYSTEM_PROMPT, get_current_date
 from agent.state import AgentState
+from agent.utils import get_llm
 
 MAX_TOOL_ROUNDS = 5
 
@@ -28,13 +27,7 @@ async def respond(state: AgentState, config: RunnableConfig) -> dict:
     producing its final text response.
     """
     configurable = Configuration.from_runnable_config(config)
-    llm = ChatOpenAI(
-        model=configurable.llm_model,
-        base_url=configurable.llm_base_url,
-        api_key=configurable.llm_api_key,
-        temperature=0.5,
-        http_async_client=httpx.AsyncClient(proxy=None),
-    )
+    llm = get_llm(configurable, temperature=0.5)
 
     core_memory = CoreMemory.from_dict(state.get("core_memory", {}))
     summaries = "\n\n---\n\n".join(state.get("web_research_result", []))
@@ -123,19 +116,13 @@ async def respond(state: AgentState, config: RunnableConfig) -> dict:
     # Auto-compress blocks that are approaching their character limit
     needs_compression = core_memory.get_blocks_needing_compression()
     if needs_compression:
-        compress_llm = ChatOpenAI(
-            model=configurable.llm_model,
-            base_url=configurable.llm_base_url,
-            api_key=configurable.llm_api_key,
-            temperature=0.2,
-            http_async_client=httpx.AsyncClient(proxy=None),
-        )
+        compress_llm = get_llm(configurable, temperature=0.2)
         for label in needs_compression:
             await core_memory.compress_block(label, compress_llm)
 
     # Save AI response to recall memory
     try:
-        await asyncio.to_thread(_sync_save_to_recall, "assistant", response.content)
+        await asyncio.to_thread(save_to_recall, "assistant", response.content)
     except Exception as e:
         print(f"[responder] Failed to save to recall: {e}", file=sys.stderr)
 

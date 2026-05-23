@@ -6,25 +6,21 @@ import asyncio
 import json
 import re
 
-import httpx
-
 from langchain_core.messages import HumanMessage
 from langchain_core.runnables import RunnableConfig
-from langchain_openai import ChatOpenAI
 
 from agent.configuration import Configuration
+from agent.db import (
+    insert_document,
+    put_batch_to_archival,
+    put_to_archival,
+    save_to_recall,
+    search_archival,
+    search_recall,
+)
 from agent.prompts import ARCHIVAL_STORE_PROMPT, EVALUATE_RECALL_PROMPT, ROUTE_INTENT_PROMPT
 from agent.state import AgentState
-
-
-def _parse_json(text: str) -> dict:
-    match = re.search(r"```(?:json)?\s*(.*?)\s*```", text, re.DOTALL)
-    if match:
-        text = match.group(1)
-    try:
-        return json.loads(text)
-    except json.JSONDecodeError:
-        return {}
+from agent.utils import get_llm, parse_json
 
 
 async def route_intent(state: AgentState, config: RunnableConfig) -> dict:
@@ -35,13 +31,7 @@ async def route_intent(state: AgentState, config: RunnableConfig) -> dict:
     if state.get("mode") in ("research", "memory_edit", "ingest"):
         return {}
 
-    llm = ChatOpenAI(
-        model=configurable.llm_model,
-        base_url=configurable.llm_base_url,
-        api_key=configurable.llm_api_key,
-        temperature=0,
-        http_async_client=httpx.AsyncClient(proxy=None),
-    )
+    llm = get_llm(configurable, temperature=0)
 
     user_msg = ""
     for msg in reversed(state["messages"]):
@@ -54,7 +44,7 @@ async def route_intent(state: AgentState, config: RunnableConfig) -> dict:
 
     prompt = ROUTE_INTENT_PROMPT.format(user_message=user_msg)
     response = await llm.ainvoke(prompt)
-    parsed = _parse_json(response.content)
+    parsed = parse_json(response.content)
     mode = parsed.get("mode", "chat")
     if mode not in ("chat", "research", "memory_edit", "ingest", "recall"):
         mode = "chat"
@@ -62,163 +52,6 @@ async def route_intent(state: AgentState, config: RunnableConfig) -> dict:
     need_recall = parsed.get("need_recall", False)
 
     return {"mode": mode, "need_recall": need_recall}
-
-
-def _sync_search_archival(query: str, limit: int = 5, alpha: float = 0.7) -> list[dict]:
-    """Hybrid search: vector similarity + BM25 keyword match, with optional cross-encoder re-ranking.
-
-    Args:
-        query: Search query text.
-        limit: Max results.
-        alpha: Weight for vector score (1-alpha for BM25). Default 0.7.
-    """
-    import psycopg
-    from pgvector import Vector
-    from pgvector.psycopg import register_vector
-
-    from agent.storage import get_db_url, get_embeddings
-
-    try:
-        embeddings = get_embeddings()
-        query_embedding = Vector(embeddings.embed_query(query))
-    except Exception as e:
-        import sys
-        print(f"[memory_manager] Embedding failed: {e}", file=sys.stderr)
-        return []
-
-    try:
-        conn = psycopg.connect(get_db_url(), connect_timeout=5)
-    except Exception as e:
-        import sys
-        print(f"[memory_manager] DB connection failed: {e}", file=sys.stderr)
-        return []
-
-    register_vector(conn)
-    # Fetch more candidates for re-ranking
-    candidate_limit = int(limit) * 3
-    rows = conn.execute(
-        """
-        SELECT content, metadata,
-               %s * (1 - (embedding <=> %s::vector))
-                 + (1 - %s) * ts_rank(content_tsv, plainto_tsquery('simple', %s))
-               AS score
-        FROM archival_memory
-        WHERE content_tsv @@ plainto_tsquery('simple', %s)
-           OR 1 - (embedding <=> %s::vector) > 0.2
-        ORDER BY score DESC
-        LIMIT %s
-        """,
-        (alpha, query_embedding, alpha, query, query, query_embedding, candidate_limit),
-    ).fetchall()
-    conn.close()
-
-    results = []
-    for row in rows:
-        score = float(row[2])
-        if score >= 0.01:
-            meta = row[1] if isinstance(row[1], dict) else json.loads(row[1])
-            results.append({"content": row[0], "metadata": meta, "score": score})
-
-    # Cross-encoder re-ranking
-    try:
-        from agent.storage.reranker import rerank
-        results = rerank(query, results, top_k=int(limit))
-    except Exception:
-        results = results[:int(limit)]
-
-    return results
-
-
-def _sync_save_to_recall(role: str, content: str, thread_id: str = "default") -> None:
-    """Save a message to the recall_memory table."""
-    import uuid
-
-    import psycopg
-    from pgvector import Vector
-    from pgvector.psycopg import register_vector
-
-    from agent.storage import ensure_recall_table, get_db_url, get_embeddings
-
-    ensure_recall_table()
-    embeddings = get_embeddings()
-    entry_id = str(uuid.uuid4())
-    embedding = Vector(embeddings.embed_query(content))
-
-    conn = psycopg.connect(get_db_url(), connect_timeout=5)
-    register_vector(conn)
-    conn.execute(
-        "INSERT INTO recall_memory (id, thread_id, role, content, embedding) "
-        "VALUES (%s, %s, %s, %s, %s) ON CONFLICT (id) DO NOTHING",
-        (entry_id, thread_id, role, content, embedding),
-    )
-    conn.commit()
-    conn.close()
-
-
-def _sync_search_recall(query: str, limit: int = 5) -> list[dict]:
-    """Semantic search over recall_memory (conversation history).
-
-    Searches across all threads for relevant past conversations.
-    Uses pure cosine similarity (no BM25 — recall table has no content_tsv),
-    with optional cross-encoder re-ranking.
-    """
-    import psycopg
-    from pgvector import Vector
-    from pgvector.psycopg import register_vector
-
-    from agent.storage import get_db_url, get_embeddings
-
-    try:
-        embeddings = get_embeddings()
-        query_embedding = Vector(embeddings.embed_query(query))
-    except Exception as e:
-        import sys
-        print(f"[memory_manager] Recall embedding failed: {e}", file=sys.stderr)
-        return []
-
-    try:
-        conn = psycopg.connect(get_db_url(), connect_timeout=5)
-    except Exception as e:
-        import sys
-        print(f"[memory_manager] Recall DB connection failed: {e}", file=sys.stderr)
-        return []
-
-    register_vector(conn)
-    candidate_limit = int(limit) * 3
-    rows = conn.execute(
-        """
-        SELECT id, thread_id, role, content, metadata,
-               1 - (embedding <=> %s::vector) AS score
-        FROM recall_memory
-        WHERE 1 - (embedding <=> %s::vector) > 0.3
-        ORDER BY score DESC
-        LIMIT %s
-        """,
-        (query_embedding, query_embedding, candidate_limit),
-    ).fetchall()
-    conn.close()
-
-    results = []
-    for row in rows:
-        score = float(row[5])
-        meta = row[4] if isinstance(row[4], dict) else json.loads(row[4])
-        results.append({
-            "id": row[0],
-            "thread_id": row[1],
-            "role": row[2],
-            "content": row[3],
-            "metadata": meta,
-            "score": score,
-        })
-
-    # Cross-encoder re-ranking
-    try:
-        from agent.storage.reranker import rerank
-        results = rerank(query, results, top_k=int(limit))
-    except Exception:
-        results = results[:int(limit)]
-
-    return results
 
 
 async def recall_memory(state: AgentState, config: RunnableConfig) -> dict:
@@ -236,14 +69,14 @@ async def recall_memory(state: AgentState, config: RunnableConfig) -> dict:
 
     # Save user message to recall memory
     try:
-        await asyncio.to_thread(_sync_save_to_recall, "user", user_msg)
+        await asyncio.to_thread(save_to_recall, "user", user_msg)
     except Exception as e:
         import sys
         print(f"[memory_manager] Failed to save to recall: {e}", file=sys.stderr)
 
     # Search both archival and recall in parallel
-    archival_task = asyncio.to_thread(_sync_search_archival, user_msg, 5)
-    recall_task = asyncio.to_thread(_sync_search_recall, user_msg, 5)
+    archival_task = asyncio.to_thread(search_archival, user_msg, 5)
+    recall_task = asyncio.to_thread(search_recall, user_msg, 5)
     archival_results_raw, recall_results_raw = await asyncio.gather(
         archival_task, recall_task
     )
@@ -321,13 +154,7 @@ async def evaluate_recall(state: AgentState, config: RunnableConfig) -> dict:
     memory_content = "\n".join(memory_parts)
 
     # Ask LLM to evaluate
-    llm = ChatOpenAI(
-        model=configurable.llm_model,
-        base_url=configurable.llm_base_url,
-        api_key=configurable.llm_api_key,
-        temperature=0,
-        http_async_client=httpx.AsyncClient(proxy=None),
-    )
+    llm = get_llm(configurable, temperature=0)
 
     prompt = EVALUATE_RECALL_PROMPT.format(
         question=user_msg,
@@ -336,7 +163,7 @@ async def evaluate_recall(state: AgentState, config: RunnableConfig) -> dict:
 
     try:
         response = await llm.ainvoke(prompt)
-        parsed = _parse_json(response.content)
+        parsed = parse_json(response.content)
         is_sufficient = parsed.get("is_sufficient", False)
         reason = parsed.get("reason", "Evaluation completed.")
     except Exception:
@@ -357,113 +184,12 @@ async def evaluate_recall(state: AgentState, config: RunnableConfig) -> dict:
     }
 
 
-def _sync_put_to_archival(content: str, namespace: str, metadata: dict) -> str:
-    """Synchronous archival storage (runs in thread)."""
-    import uuid
-    from datetime import datetime, timezone
-
-    import psycopg
-    from pgvector import Vector
-    from pgvector.psycopg import register_vector
-
-    from agent.storage import get_db_url, get_embeddings
-
-    embeddings = get_embeddings()
-    entry_id = str(uuid.uuid4())
-    metadata["timestamp"] = datetime.now(timezone.utc).isoformat()
-    embedding = Vector(embeddings.embed_query(content))
-
-    conn = psycopg.connect(get_db_url(), connect_timeout=5)
-    register_vector(conn)
-    conn.execute(
-        "INSERT INTO archival_memory (id, namespace, content, metadata, embedding) "
-        "VALUES (%s, %s, %s, %s, %s) ON CONFLICT (id) DO UPDATE SET "
-        "content=EXCLUDED.content, metadata=EXCLUDED.metadata, embedding=EXCLUDED.embedding",
-        (entry_id, namespace, content, json.dumps(metadata), embedding),
-    )
-    conn.commit()
-    conn.close()
-    return entry_id
-
-
-def _sync_put_batch_to_archival(entries: list[dict], namespace: str, document_id: str | None = None) -> list[str]:
-    """Synchronous batch archival storage (runs in thread)."""
-    import uuid
-    from datetime import datetime, timezone
-
-    import psycopg
-    from pgvector import Vector
-    from pgvector.psycopg import register_vector
-
-    from agent.storage import get_db_url, get_embeddings
-
-    if not entries:
-        return []
-
-    embeddings = get_embeddings()
-    embedding_vectors = embeddings.embed_documents([e["content"] for e in entries])
-    now = datetime.now(timezone.utc).isoformat()
-    ids: list[str] = []
-
-    conn = psycopg.connect(get_db_url(), connect_timeout=5)
-    register_vector(conn)
-    for entry, emb in zip(entries, embedding_vectors):
-        entry_id = str(uuid.uuid4())
-        meta = entry.get("metadata", {})
-        meta["timestamp"] = now
-        ids.append(entry_id)
-        conn.execute(
-            "INSERT INTO archival_memory (id, namespace, content, metadata, embedding, document_id) "
-            "VALUES (%s, %s, %s, %s, %s, %s) ON CONFLICT (id) DO UPDATE SET "
-            "content=EXCLUDED.content, metadata=EXCLUDED.metadata, embedding=EXCLUDED.embedding",
-            (entry_id, namespace, entry["content"], json.dumps(meta), Vector(emb), document_id),
-        )
-    conn.commit()
-    conn.close()
-    return ids
-
-
-def _sync_insert_document(title: str, source: str, source_type: str, content_full: str, chunk_count: int) -> tuple[str, bool]:
-    """Insert a document record. Returns (doc_id, is_new)."""
-    import psycopg
-    from agent.storage import get_db_url
-
-    conn = psycopg.connect(get_db_url(), connect_timeout=5)
-    import uuid
-    doc_id = str(uuid.uuid4())
-    result = conn.execute(
-        "INSERT INTO documents (id, title, source, source_type, content_full, chunk_count) "
-        "VALUES (%s, %s, %s, %s, %s, %s) "
-        "ON CONFLICT (title, source) DO NOTHING "
-        "RETURNING id",
-        (doc_id, title, source, source_type, content_full, chunk_count),
-    )
-    row = result.fetchone()
-    if row:
-        conn.commit()
-        conn.close()
-        return row[0], True
-    # Conflict — document already exists
-    existing = conn.execute(
-        "SELECT id FROM documents WHERE title = %s AND source = %s",
-        (title, source),
-    ).fetchone()
-    conn.close()
-    return existing[0], False
-
-
 async def save_to_archival(state: AgentState, config: RunnableConfig) -> dict:
     """Extract key findings and save them to archival memory (PostgreSQL)."""
     from datetime import datetime, timezone
 
     configurable = Configuration.from_runnable_config(config)
-    llm = ChatOpenAI(
-        model=configurable.llm_model,
-        base_url=configurable.llm_base_url,
-        api_key=configurable.llm_api_key,
-        temperature=0.3,
-        http_async_client=httpx.AsyncClient(proxy=None),
-    )
+    llm = get_llm(configurable, temperature=0.3)
 
     research_topic = _get_research_topic(state["messages"])
     summaries = "\n\n---\n\n".join(state.get("web_research_result", []))
@@ -479,7 +205,7 @@ async def save_to_archival(state: AgentState, config: RunnableConfig) -> dict:
 
     try:
         entry_id = await asyncio.to_thread(
-            _sync_put_to_archival,
+            put_to_archival,
             response.content,
             "research",
             {"source": "research_summary", "topic": research_topic},
@@ -603,7 +329,7 @@ async def ingest_document_node(state: AgentState, config: RunnableConfig) -> dic
 
         # Write to documents table first
         document_id, is_new = await asyncio.to_thread(
-            _sync_insert_document,
+            insert_document,
             doc_label,
             doc_source if source_type == "url" else doc_label,
             source_type,
@@ -619,7 +345,7 @@ async def ingest_document_node(state: AgentState, config: RunnableConfig) -> dic
             for c in chunks
         ]
         entry_ids = await asyncio.to_thread(
-            _sync_put_batch_to_archival, entries, "ingested", document_id
+            put_batch_to_archival, entries, "ingested", document_id
         )
 
         if source_type == "pdf":

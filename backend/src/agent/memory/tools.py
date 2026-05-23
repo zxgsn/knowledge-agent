@@ -9,117 +9,12 @@ They operate on the agent's CoreMemory instance passed via a closure or context.
 
 from __future__ import annotations
 
-import json
-import uuid
-from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Literal
 
 from langchain_core.tools import tool
 
 if TYPE_CHECKING:
     from agent.memory.core_memory import CoreMemory
-
-
-def _sync_search_archival(query: str, limit: int = 5, alpha: float = 0.7) -> list[dict]:
-    """Hybrid search: vector similarity + BM25 keyword match, with optional cross-encoder re-ranking."""
-    import psycopg
-    from pgvector import Vector
-    from pgvector.psycopg import register_vector
-    from agent.storage import get_db_url, get_embeddings
-
-    try:
-        embeddings = get_embeddings()
-        query_embedding = Vector(embeddings.embed_query(query))
-    except Exception:
-        return []
-
-    try:
-        conn = psycopg.connect(get_db_url(), connect_timeout=5)
-    except Exception:
-        return []
-
-    register_vector(conn)
-    candidate_limit = int(limit) * 3
-    rows = conn.execute(
-        """
-        SELECT content, metadata,
-               %s * (1 - (embedding <=> %s::vector))
-                 + (1 - %s) * LEAST(1, ts_rank(content_tsv, plainto_tsquery('english', %s)) * 5)
-               AS score
-        FROM archival_memory
-        WHERE 1 - (embedding <=> %s::vector) > 0.15
-        ORDER BY score DESC
-        LIMIT %s
-        """,
-        (alpha, query_embedding, alpha, query, query_embedding, candidate_limit),
-    ).fetchall()
-    conn.close()
-
-    results = []
-    for row in rows:
-        score = float(row[2])
-        meta = row[1] if isinstance(row[1], dict) else json.loads(row[1])
-        results.append({"content": row[0], "metadata": meta, "score": score})
-
-    # Cross-encoder re-ranking
-    try:
-        from agent.storage.reranker import rerank
-        results = rerank(query, results, top_k=int(limit))
-    except Exception:
-        results = results[:int(limit)]
-
-    return results
-
-
-def _sync_insert_document(title: str, source: str, source_type: str, content_full: str, chunk_count: int) -> tuple[str, bool]:
-    """Insert a document record. Returns (doc_id, is_new)."""
-    import psycopg
-    from agent.storage import get_db_url
-
-    conn = psycopg.connect(get_db_url(), connect_timeout=5)
-    doc_id = str(uuid.uuid4())
-    result = conn.execute(
-        "INSERT INTO documents (id, title, source, source_type, content_full, chunk_count) "
-        "VALUES (%s, %s, %s, %s, %s, %s) "
-        "ON CONFLICT (title, source) DO NOTHING "
-        "RETURNING id",
-        (doc_id, title, source, source_type, content_full, chunk_count),
-    )
-    row = result.fetchone()
-    if row:
-        conn.commit()
-        conn.close()
-        return row[0], True
-    existing = conn.execute(
-        "SELECT id FROM documents WHERE title = %s AND source = %s",
-        (title, source),
-    ).fetchone()
-    conn.close()
-    return existing[0], False
-
-
-def _sync_put_to_archival(content: str, namespace: str, metadata: dict, document_id: str | None = None) -> str:
-    """Store a single entry in archival memory."""
-    import psycopg
-    from pgvector import Vector
-    from pgvector.psycopg import register_vector
-    from agent.storage import get_db_url, get_embeddings
-
-    embeddings = get_embeddings()
-    entry_id = str(uuid.uuid4())
-    metadata["timestamp"] = datetime.now(timezone.utc).isoformat()
-    embedding = Vector(embeddings.embed_query(content))
-
-    conn = psycopg.connect(get_db_url(), connect_timeout=5)
-    register_vector(conn)
-    conn.execute(
-        "INSERT INTO archival_memory (id, namespace, content, metadata, embedding, document_id) "
-        "VALUES (%s, %s, %s, %s, %s, %s) ON CONFLICT (id) DO NOTHING",
-        (entry_id, namespace, content, json.dumps(metadata), embedding, document_id),
-    )
-    conn.commit()
-    conn.close()
-    return entry_id
 
 
 def create_memory_tools(
@@ -261,6 +156,7 @@ def create_memory_tools(
     # --- Archival Memory Tools ---
 
     if enable_archival:
+        from agent.db import insert_document, put_to_archival, search_archival
 
         @tool
         def archival_memory_search(query: str, limit: int = 5) -> str:
@@ -273,7 +169,7 @@ def create_memory_tools(
                 query: The search query.
                 limit: Maximum number of results to return (default 5).
             """
-            results = _sync_search_archival(query=query, limit=limit)
+            results = search_archival(query=query, limit=limit)
             if not results:
                 return "No relevant results found in archival memory."
 
@@ -299,7 +195,7 @@ def create_memory_tools(
                 content: The text to save. Should be self-contained and meaningful on its own.
                 source: A label describing where this knowledge came from.
             """
-            entry_id = _sync_put_to_archival(
+            entry_id = put_to_archival(
                 content=content,
                 namespace="manual",
                 metadata={"source": source, "type": "manual_save"},
@@ -357,7 +253,7 @@ def create_memory_tools(
 
             # Write full document to documents table first
             full_text = "\n\n".join(c.content for c in chunks)
-            document_id, is_new = _sync_insert_document(
+            document_id, is_new = insert_document(
                 doc_label,
                 source if source_type == "url" else doc_label,
                 source_type,
@@ -370,7 +266,7 @@ def create_memory_tools(
 
             ids = []
             for c in chunks:
-                eid = _sync_put_to_archival(
+                eid = put_to_archival(
                     content=c.content,
                     namespace="ingested",
                     metadata={

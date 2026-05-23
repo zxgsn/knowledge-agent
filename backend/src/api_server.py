@@ -6,7 +6,6 @@ Run with: uvicorn src.api_server:app --port 8000
 from __future__ import annotations
 
 import json
-import os
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, Query
@@ -90,17 +89,6 @@ class DocumentStats(BaseModel):
 # --- DB helper ---
 
 
-def _get_conn():
-    import psycopg
-    from pgvector.psycopg import register_vector
-
-    from agent.storage import get_db_url
-
-    conn = psycopg.connect(get_db_url(), connect_timeout=5)
-    register_vector(conn)
-    return conn
-
-
 def _parse_meta(meta) -> dict:
     if isinstance(meta, dict):
         return meta
@@ -115,17 +103,18 @@ def _parse_meta(meta) -> dict:
 
 @app.get("/api/archival/stats", response_model=list[NamespaceStats])
 def get_archival_stats():
-    conn = _get_conn()
-    rows = conn.execute(
-        """
-        SELECT namespace, COUNT(*),
-               MIN(created_at)::text, MAX(created_at)::text
-        FROM archival_memory
-        GROUP BY namespace
-        ORDER BY COUNT(*) DESC
-        """
-    ).fetchall()
-    conn.close()
+    from agent.storage import get_conn
+
+    with get_conn() as conn:
+        rows = conn.execute(
+            """
+            SELECT namespace, COUNT(*),
+                   MIN(created_at)::text, MAX(created_at)::text
+            FROM archival_memory
+            GROUP BY namespace
+            ORDER BY COUNT(*) DESC
+            """
+        ).fetchall()
     return [
         NamespaceStats(
             namespace=r[0], count=r[1],
@@ -143,7 +132,8 @@ def list_archival_entries(
     search: str = Query(default=""),
     exclude_namespaces: str = Query(default=""),
 ):
-    conn = _get_conn()
+    from agent.storage import get_conn
+
     params: list = []
     where_clauses: list[str] = []
 
@@ -159,30 +149,30 @@ def list_archival_entries(
 
     if search:
         where_clauses.append(
-            "content_tsv @@ plainto_tsquery('simple', %s)"
+            "content_tsv @@ plainto_tsquery('english', %s)"
         )
         params.append(search)
 
     where = ("WHERE " + " AND ".join(where_clauses)) if where_clauses else ""
 
-    # Total count
-    count_params = list(params)
-    total = conn.execute(
-        f"SELECT COUNT(*) FROM archival_memory {where}", count_params
-    ).fetchone()[0]
+    with get_conn() as conn:
+        # Total count
+        count_params = list(params)
+        total = conn.execute(
+            f"SELECT COUNT(*) FROM archival_memory {where}", count_params
+        ).fetchone()[0]
 
-    # Fetch page
-    params.extend([limit, offset])
-    rows = conn.execute(
-        f"""
-        SELECT id, namespace, content, metadata, created_at::text
-        FROM archival_memory {where}
-        ORDER BY created_at DESC
-        LIMIT %s OFFSET %s
-        """,
-        params,
-    ).fetchall()
-    conn.close()
+        # Fetch page
+        params.extend([limit, offset])
+        rows = conn.execute(
+            f"""
+            SELECT id, namespace, content, metadata, created_at::text
+            FROM archival_memory {where}
+            ORDER BY created_at DESC
+            LIMIT %s OFFSET %s
+            """,
+            params,
+        ).fetchall()
 
     entries = [
         ArchivalEntry(
@@ -196,15 +186,17 @@ def list_archival_entries(
 
 @app.get("/api/archival/entries/{entry_id}", response_model=ArchivalEntry)
 def get_archival_entry(entry_id: str):
-    conn = _get_conn()
-    row = conn.execute(
-        "SELECT id, namespace, content, metadata, created_at::text "
-        "FROM archival_memory WHERE id = %s",
-        (entry_id,),
-    ).fetchone()
-    conn.close()
+    from fastapi import HTTPException
+
+    from agent.storage import get_conn
+
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT id, namespace, content, metadata, created_at::text "
+            "FROM archival_memory WHERE id = %s",
+            (entry_id,),
+        ).fetchone()
     if not row:
-        from fastapi import HTTPException
         raise HTTPException(status_code=404, detail="Entry not found")
     return ArchivalEntry(
         id=row[0], namespace=row[1], content=row[2],
@@ -217,13 +209,14 @@ def get_archival_entry(entry_id: str):
 
 @app.get("/api/documents/stats", response_model=DocumentStats)
 def get_document_stats():
-    conn = _get_conn()
-    total = conn.execute("SELECT COUNT(*) FROM documents").fetchone()[0]
-    rows = conn.execute(
-        "SELECT COALESCE(source_type, 'unknown'), COUNT(*) "
-        "FROM documents GROUP BY source_type ORDER BY COUNT(*) DESC"
-    ).fetchall()
-    conn.close()
+    from agent.storage import get_conn
+
+    with get_conn() as conn:
+        total = conn.execute("SELECT COUNT(*) FROM documents").fetchone()[0]
+        rows = conn.execute(
+            "SELECT COALESCE(source_type, 'unknown'), COUNT(*) "
+            "FROM documents GROUP BY source_type ORDER BY COUNT(*) DESC"
+        ).fetchall()
     return DocumentStats(
         total_documents=total,
         by_source_type={r[0]: r[1] for r in rows},
@@ -236,7 +229,8 @@ def list_documents(
     offset: int = Query(default=0, ge=0),
     search: str = Query(default=""),
 ):
-    conn = _get_conn()
+    from agent.storage import get_conn
+
     params: list = []
     where_clauses: list[str] = []
 
@@ -248,22 +242,22 @@ def list_documents(
 
     where = ("WHERE " + " AND ".join(where_clauses)) if where_clauses else ""
 
-    count_params = list(params)
-    total = conn.execute(
-        f"SELECT COUNT(*) FROM documents {where}", count_params
-    ).fetchone()[0]
+    with get_conn() as conn:
+        count_params = list(params)
+        total = conn.execute(
+            f"SELECT COUNT(*) FROM documents {where}", count_params
+        ).fetchone()[0]
 
-    params.extend([limit, offset])
-    rows = conn.execute(
-        f"""
-        SELECT id, title, source, source_type, chunk_count, created_at::text
-        FROM documents {where}
-        ORDER BY created_at DESC
-        LIMIT %s OFFSET %s
-        """,
-        params,
-    ).fetchall()
-    conn.close()
+        params.extend([limit, offset])
+        rows = conn.execute(
+            f"""
+            SELECT id, title, source, source_type, chunk_count, created_at::text
+            FROM documents {where}
+            ORDER BY created_at DESC
+            LIMIT %s OFFSET %s
+            """,
+            params,
+        ).fetchall()
 
     documents = [
         DocumentSummary(
@@ -278,23 +272,24 @@ def list_documents(
 @app.get("/api/documents/{doc_id}", response_model=DocumentDetail)
 def get_document(doc_id: str):
     from fastapi import HTTPException
-    conn = _get_conn()
-    row = conn.execute(
-        "SELECT id, title, source, source_type, content_full, chunk_count, metadata, created_at::text "
-        "FROM documents WHERE id = %s",
-        (doc_id,),
-    ).fetchone()
-    if not row:
-        conn.close()
-        raise HTTPException(status_code=404, detail="Document not found")
 
-    # Fetch associated chunks
-    chunk_rows = conn.execute(
-        "SELECT id, namespace, content, metadata, created_at::text "
-        "FROM archival_memory WHERE document_id = %s ORDER BY created_at",
-        (doc_id,),
-    ).fetchall()
-    conn.close()
+    from agent.storage import get_conn
+
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT id, title, source, source_type, content_full, chunk_count, metadata, created_at::text "
+            "FROM documents WHERE id = %s",
+            (doc_id,),
+        ).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="Document not found")
+
+        # Fetch associated chunks
+        chunk_rows = conn.execute(
+            "SELECT id, namespace, content, metadata, created_at::text "
+            "FROM archival_memory WHERE document_id = %s ORDER BY created_at",
+            (doc_id,),
+        ).fetchall()
 
     chunks = [
         ArchivalEntry(
@@ -316,12 +311,13 @@ def get_document(doc_id: str):
 
 @app.get("/api/recall/stats")
 def get_recall_stats():
-    conn = _get_conn()
-    msg_count = conn.execute("SELECT COUNT(*) FROM recall_memory").fetchone()[0]
-    thread_count = conn.execute(
-        "SELECT COUNT(DISTINCT thread_id) FROM recall_memory"
-    ).fetchone()[0]
-    conn.close()
+    from agent.storage import get_conn
+
+    with get_conn() as conn:
+        msg_count = conn.execute("SELECT COUNT(*) FROM recall_memory").fetchone()[0]
+        thread_count = conn.execute(
+            "SELECT COUNT(DISTINCT thread_id) FROM recall_memory"
+        ).fetchone()[0]
     return {"message_count": msg_count, "thread_count": thread_count}
 
 
@@ -332,7 +328,8 @@ def list_recall_entries(
     offset: int = Query(default=0, ge=0),
     search: str = Query(default=""),
 ):
-    conn = _get_conn()
+    from agent.storage import get_conn
+
     params: list = []
     where_clauses: list[str] = []
 
@@ -342,28 +339,28 @@ def list_recall_entries(
 
     if search:
         where_clauses.append(
-            "to_tsvector('simple', content) @@ plainto_tsquery('simple', %s)"
+            "to_tsvector('english', content) @@ plainto_tsquery('english', %s)"
         )
         params.append(search)
 
     where = ("WHERE " + " AND ".join(where_clauses)) if where_clauses else ""
 
-    count_params = list(params)
-    total = conn.execute(
-        f"SELECT COUNT(*) FROM recall_memory {where}", count_params
-    ).fetchone()[0]
+    with get_conn() as conn:
+        count_params = list(params)
+        total = conn.execute(
+            f"SELECT COUNT(*) FROM recall_memory {where}", count_params
+        ).fetchone()[0]
 
-    params.extend([limit, offset])
-    rows = conn.execute(
-        f"""
-        SELECT id, thread_id, role, content, metadata, created_at::text
-        FROM recall_memory {where}
-        ORDER BY created_at DESC
-        LIMIT %s OFFSET %s
-        """,
-        params,
-    ).fetchall()
-    conn.close()
+        params.extend([limit, offset])
+        rows = conn.execute(
+            f"""
+            SELECT id, thread_id, role, content, metadata, created_at::text
+            FROM recall_memory {where}
+            ORDER BY created_at DESC
+            LIMIT %s OFFSET %s
+            """,
+            params,
+        ).fetchall()
 
     entries = [
         RecallEntry(
