@@ -19,6 +19,12 @@ A personal knowledge agent with persistent memory, built on LangGraph. It can re
 - **Thread Isolation** — Recall memory scoped per session via `thread_id`
 - **Full-Stack UI** — React frontend with streaming, document library, and conversation sidebar
 
+## Demo
+
+### Memory Retrieval
+
+![Memory Retrieval](images/memory_retrieved.png)
+
 ## Architecture
 
 ### Agent Graph

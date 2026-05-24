@@ -17,6 +17,12 @@
 - **会话隔离** — Recall Memory 通过 `thread_id` 按会话隔离
 - **全栈 UI** — React 前端，流式通信，文档库，对话历史侧边栏
 
+## 演示
+
+### 记忆检索
+
+![记忆检索](images/memory_retrieved.png)
+
 ## 架构设计
 
 ### Agent 图结构
