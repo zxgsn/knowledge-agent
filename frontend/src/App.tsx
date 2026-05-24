@@ -6,6 +6,7 @@ import { ProcessedEvent } from "@/components/ActivityTimeline";
 import { WelcomeScreen } from "@/components/WelcomeScreen";
 import { ChatMessagesView } from "@/components/ChatMessagesView";
 import { DocumentLibrary } from "@/components/DocumentLibrary";
+import { CoreMemoryPanel } from "@/components/CoreMemoryPanel";
 import { ThreadSidebar } from "@/components/ThreadSidebar";
 import { Button } from "@/components/ui/button";
 
@@ -21,6 +22,7 @@ export default function App() {
   const [error, setError] = useState<string | null>(null);
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [currentThreadId, setCurrentThreadId] = useState<string | null>(null);
+  const [coreMemoryRefreshKey, setCoreMemoryRefreshKey] = useState(0);
   const thread = useStream<{
     messages: Message[];
     core_memory: Record<string, string>;
@@ -225,6 +227,7 @@ export default function App() {
         }));
       }
       hasFinalizeEventOccurredRef.current = false;
+      setCoreMemoryRefreshKey((k) => k + 1);
     }
   }, [thread.messages, thread.isLoading, processedEventsTimeline]);
 
@@ -282,7 +285,11 @@ export default function App() {
                 isOpen={sidebarOpen}
                 onToggle={() => setSidebarOpen(!sidebarOpen)}
               />
-              <main className="h-full flex-1 max-w-4xl mx-auto">
+              <CoreMemoryPanel
+                threadId={currentThreadId}
+                refreshKey={coreMemoryRefreshKey}
+              />
+            <main className="h-full flex-1 max-w-4xl mx-auto">
               {error ? (
                 <div className="flex flex-col items-center justify-center h-full">
                   <div className="flex flex-col items-center justify-center gap-4">

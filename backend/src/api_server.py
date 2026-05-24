@@ -6,6 +6,7 @@ Run with: uvicorn src.api_server:app --port 8000
 from __future__ import annotations
 
 import json
+import os
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, Query
@@ -85,6 +86,20 @@ class DocumentListResponse(BaseModel):
 class DocumentStats(BaseModel):
     total_documents: int
     by_source_type: dict[str, int]
+
+
+class CoreMemoryBlock(BaseModel):
+    label: str
+    value: str
+    description: str
+    limit: int
+    chars_current: int
+    read_only: bool
+
+
+class CoreMemoryResponse(BaseModel):
+    blocks: list[CoreMemoryBlock]
+    raw: dict[str, str]
 
 
 class CreateEntryRequest(BaseModel):
@@ -384,6 +399,49 @@ def list_recall_entries(
     return RecallListResponse(entries=entries, total=total)
 
 
+# --- Core Memory endpoints ---
+
+
+@app.get("/api/core-memory/{thread_id}", response_model=CoreMemoryResponse)
+def get_core_memory(thread_id: str):
+    """Fetch core memory blocks for a thread from the LangGraph server."""
+    import httpx
+    from fastapi import HTTPException
+
+    from agent.memory.block import DEFAULT_BLOCKS
+    from agent.memory.core_memory import CoreMemory
+
+    langgraph_url = os.environ.get("LANGGRAPH_API_URL", "http://localhost:2024")
+
+    try:
+        with httpx.Client(timeout=10) as client:
+            resp = client.get(f"{langgraph_url}/threads/{thread_id}/state")
+            resp.raise_for_status()
+    except httpx.HTTPStatusError as e:
+        raise HTTPException(status_code=e.response.status_code, detail="Thread state not found")
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"LangGraph server error: {e}")
+
+    state = resp.json().get("values", {})
+    raw = state.get("core_memory", {})
+
+    # Reconstruct CoreMemory to get full block metadata
+    cm = CoreMemory.from_dict(raw)
+
+    blocks = [
+        CoreMemoryBlock(
+            label=b.label,
+            value=b.value,
+            description=b.description,
+            limit=b.limit,
+            chars_current=b.chars_current,
+            read_only=b.read_only,
+        )
+        for b in cm.blocks
+    ]
+    return CoreMemoryResponse(blocks=blocks, raw=raw)
+
+
 # --- Delete endpoints ---
 
 
@@ -499,6 +557,31 @@ def delete_recall_entry(entry_id: str):
     from fastapi import HTTPException
 
     from agent.storage import get_conn
+
+    with get_conn() as conn:
+        result = conn.execute(
+            "DELETE FROM recall_memory WHERE id = %s", (entry_id,)
+        )
+        conn.commit()
+
+    if result.rowcount == 0:
+        raise HTTPException(status_code=404, detail="Entry not found")
+
+    return {"deleted": True, "entry_id": entry_id}
+
+
+@app.delete("/api/recall/entries")
+def delete_recall_by_thread(thread_id: str = Query(...)):
+    """Delete all recall memory entries for a thread."""
+    from agent.storage import get_conn
+
+    with get_conn() as conn:
+        result = conn.execute(
+            "DELETE FROM recall_memory WHERE thread_id = %s", (thread_id,)
+        )
+        conn.commit()
+
+    return {"deleted": True, "thread_id": thread_id, "count": result.rowcount}
 
     with get_conn() as conn:
         result = conn.execute(

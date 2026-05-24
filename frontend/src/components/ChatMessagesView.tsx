@@ -308,8 +308,15 @@ export function ChatMessagesView({
       </Link>
       <ScrollArea className="flex-1 overflow-y-auto" ref={scrollAreaRef}>
         <div className="p-4 md:p-6 space-y-2 max-w-4xl mx-auto pt-16">
-          {messages.map((message, index) => {
-            const isLast = index === messages.length - 1;
+          {messages.filter((message) => {
+            // Skip AI messages with no content (intermediate tool-calling steps)
+            if (message.type === "ai") {
+              const c = message.content;
+              if (!c || (typeof c === "string" && c.trim().length === 0)) return false;
+            }
+            return true;
+          }).map((message, index, arr) => {
+            const isLast = index === arr.length - 1;
             return (
               <div key={message.id || `msg-${index}`} className="space-y-3">
                 <div

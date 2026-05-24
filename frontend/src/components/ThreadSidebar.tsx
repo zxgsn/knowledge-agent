@@ -1,7 +1,6 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import { Button } from "@/components/ui/button";
-import { ScrollArea } from "@/components/ui/scroll-area";
-import { MessageSquare, Plus, PanelLeftClose, PanelLeft } from "lucide-react";
+import { MessageSquare, Plus, PanelLeftClose, PanelLeft, Trash2, Loader2 } from "lucide-react";
 import { Client } from "@langchain/langgraph-sdk";
 
 const API_URL = import.meta.env.DEV
@@ -49,6 +48,29 @@ export function ThreadSidebar({
 }: ThreadSidebarProps) {
   const [threads, setThreads] = useState<Thread[]>([]);
   const [loading, setLoading] = useState(false);
+  const [deletingId, setDeletingId] = useState<string | null>(null);
+  const [width, setWidth] = useState(256);
+  const isResizing = useRef(false);
+
+  const handleDelete = useCallback(async (threadId: string, e: React.MouseEvent) => {
+    e.stopPropagation();
+    if (!confirm("Delete this conversation and its recall memory?")) return;
+    setDeletingId(threadId);
+    try {
+      const client = new Client({ apiUrl: API_URL });
+      await client.threads.delete(threadId);
+      try {
+        const API_BASE = import.meta.env.DEV ? "http://localhost:8000" : "";
+        await fetch(`${API_BASE}/api/recall/entries?thread_id=${threadId}`, { method: "DELETE" });
+      } catch { /* best-effort */ }
+      setThreads((prev) => prev.filter((t) => t.thread_id !== threadId));
+      if (currentThreadId === threadId) onThreadSelect(null);
+    } catch (err) {
+      console.error("Failed to delete thread:", err);
+    } finally {
+      setDeletingId(null);
+    }
+  }, [currentThreadId, onThreadSelect]);
 
   const fetchThreads = useCallback(async () => {
     setLoading(true);
@@ -60,16 +82,36 @@ export function ThreadSidebar({
         sortOrder: "desc",
       });
 
-      const parsed: Thread[] = threadList.map((t: any) => {
-        const msgs = t.values?.messages || [];
-        const firstHuman = msgs.find((m: any) => m.type === "human");
-        return {
-          thread_id: t.thread_id,
-          created_at: t.created_at || t.metadata?.created_at || "",
-          first_message: firstHuman?.content || "",
-        };
+      // Pre-filter: need messages in values AND at least one AI message
+      const candidates = threadList.filter((t: any) => {
+        const msgs = t.values?.messages;
+        if (!Array.isArray(msgs) || msgs.length === 0) return false;
+        return msgs.some((m: any) => m.type === "ai");
       });
-      setThreads(parsed);
+
+      // Check history for each candidate — useStream loads via getHistory, not values
+      const validThreads: Thread[] = [];
+      await Promise.all(
+        candidates.map(async (t: any) => {
+          try {
+            const hist = await client.threads.getHistory(t.thread_id, { limit: 1 });
+            if (hist.length === 0) return; // no checkpoint — useStream will show nothing
+          } catch {
+            return; // history fetch failed — skip
+          }
+          const msgs = t.values.messages;
+          const firstHuman = msgs.find((m: any) => m.type === "human");
+          validThreads.push({
+            thread_id: t.thread_id,
+            created_at: t.created_at || t.metadata?.created_at || "",
+            first_message: firstHuman?.content || "",
+          });
+        })
+      );
+
+      // Sort by created_at descending (Promise.all may reorder)
+      validThreads.sort((a, b) => (b.created_at > a.created_at ? 1 : -1));
+      setThreads(validThreads);
     } catch (err) {
       console.error("Failed to fetch threads:", err);
     }
@@ -79,6 +121,29 @@ export function ThreadSidebar({
   useEffect(() => {
     if (isOpen) fetchThreads();
   }, [isOpen, fetchThreads]);
+
+  // Resize handlers
+  const handleMouseDown = useCallback((e: React.MouseEvent) => {
+    e.preventDefault();
+    isResizing.current = true;
+    const startX = e.clientX;
+    const startWidth = width;
+
+    const onMouseMove = (e: MouseEvent) => {
+      if (!isResizing.current) return;
+      const newWidth = Math.max(200, Math.min(500, startWidth + (e.clientX - startX)));
+      setWidth(newWidth);
+    };
+
+    const onMouseUp = () => {
+      isResizing.current = false;
+      document.removeEventListener("mousemove", onMouseMove);
+      document.removeEventListener("mouseup", onMouseUp);
+    };
+
+    document.addEventListener("mousemove", onMouseMove);
+    document.addEventListener("mouseup", onMouseUp);
+  }, [width]);
 
   if (!isOpen) {
     return (
@@ -97,7 +162,10 @@ export function ThreadSidebar({
   }
 
   return (
-    <div className="flex flex-col w-64 min-w-[256px] bg-neutral-900 border-r border-neutral-700 h-full">
+    <div
+      className="flex flex-col bg-neutral-900 border-r border-neutral-700 h-full relative"
+      style={{ width: `${width}px`, minWidth: `${width}px` }}
+    >
       {/* Header */}
       <div className="flex items-center justify-between p-3 border-b border-neutral-700">
         <span className="text-sm font-medium text-neutral-300">Conversations</span>
@@ -124,7 +192,7 @@ export function ThreadSidebar({
       </div>
 
       {/* Thread list */}
-      <ScrollArea className="flex-1">
+      <div className="flex-1 overflow-y-auto">
         {loading ? (
           <div className="text-center text-neutral-500 py-8 text-sm">Loading...</div>
         ) : threads.length === 0 ? (
@@ -132,31 +200,49 @@ export function ThreadSidebar({
         ) : (
           <div className="p-2 space-y-1">
             {threads.map((t) => (
-              <button
+              <div
                 key={t.thread_id}
-                onClick={() => onThreadSelect(t.thread_id)}
-                className={`w-full text-left px-3 py-2 rounded-lg text-sm transition-colors ${
+                className={`w-full text-left px-3 py-2 rounded-lg text-sm transition-colors cursor-pointer ${
                   currentThreadId === t.thread_id
                     ? "bg-neutral-700 text-neutral-100"
                     : "text-neutral-400 hover:bg-neutral-800 hover:text-neutral-200"
                 }`}
+                onClick={() => onThreadSelect(t.thread_id)}
               >
                 <div className="flex items-center gap-2">
                   <MessageSquare className="w-3.5 h-3.5 flex-shrink-0" />
-                  <span className="truncate flex-1">
-                    {t.first_message ? truncate(t.first_message, 40) : "New conversation"}
+                  <span className="truncate flex-1 min-w-0">
+                    {t.first_message ? truncate(t.first_message, 30) : "New conversation"}
                   </span>
+                  <button
+                    onClick={(e) => handleDelete(t.thread_id, e)}
+                    disabled={deletingId === t.thread_id}
+                    className="flex-shrink-0 p-1 rounded hover:bg-red-500/20 text-neutral-500 hover:text-red-400 transition-colors"
+                    title="Delete conversation"
+                  >
+                    {deletingId === t.thread_id ? (
+                      <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                    ) : (
+                      <Trash2 className="w-3.5 h-3.5" />
+                    )}
+                  </button>
                 </div>
                 {t.created_at && (
                   <span className="text-xs text-neutral-600 ml-5">
                     {timeAgo(t.created_at)}
                   </span>
                 )}
-              </button>
+              </div>
             ))}
           </div>
         )}
-      </ScrollArea>
+      </div>
+
+      {/* Resize handle */}
+      <div
+        className="absolute top-0 right-0 w-1 h-full cursor-col-resize hover:bg-sky-500/50 transition-colors z-10"
+        onMouseDown={handleMouseDown}
+      />
     </div>
   );
 }
