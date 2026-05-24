@@ -6,6 +6,7 @@ Import these instead of duplicating DB logic across node files.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
@@ -266,28 +267,55 @@ def put_batch_to_archival(
     return ids
 
 
+def _ensure_content_hash_column() -> None:
+    """Add content_hash column and unique index to documents table if missing."""
+    with get_conn() as conn:
+        conn.execute("""
+            DO $$
+            BEGIN
+                IF NOT EXISTS (
+                    SELECT 1 FROM information_schema.columns
+                    WHERE table_name = 'documents' AND column_name = 'content_hash'
+                ) THEN
+                    ALTER TABLE documents ADD COLUMN content_hash TEXT;
+                    UPDATE documents SET content_hash = encode(sha256(convert_to(content_full, 'UTF8')), 'hex')
+                        WHERE content_hash IS NULL;
+                    ALTER TABLE documents ALTER COLUMN content_hash SET NOT NULL;
+                    CREATE UNIQUE INDEX IF NOT EXISTS idx_documents_content_hash ON documents (content_hash);
+                END IF;
+            END$$;
+        """)
+        conn.commit()
+
+
 def insert_document(
     title: str, source: str, source_type: str, content_full: str, chunk_count: int
 ) -> tuple[str, bool]:
-    """Insert a document record. Returns (doc_id, is_new)."""
+    """Insert a document record. Returns (doc_id, is_new).
+
+    Deduplicates by SHA256 hash of content, not by filename.
+    """
+    _ensure_content_hash_column()
+
+    content_hash = hashlib.sha256(content_full.encode("utf-8")).hexdigest()
     doc_id = str(uuid.uuid4())
 
     with get_conn() as conn:
         result = conn.execute(
-            "INSERT INTO documents (id, title, source, source_type, content_full, chunk_count) "
-            "VALUES (%s, %s, %s, %s, %s, %s) "
-            "ON CONFLICT (title, source) DO NOTHING "
+            "INSERT INTO documents (id, title, source, source_type, content_full, chunk_count, content_hash) "
+            "VALUES (%s, %s, %s, %s, %s, %s, %s) "
+            "ON CONFLICT (content_hash) DO NOTHING "
             "RETURNING id",
-            (doc_id, title, source, source_type, content_full, chunk_count),
+            (doc_id, title, source, source_type, content_full, chunk_count, content_hash),
         )
         row = result.fetchone()
         if row:
             conn.commit()
             return row[0], True
-        # Conflict — document already exists
+        # Conflict — document with same content already exists
         existing = conn.execute(
-            "SELECT id FROM documents WHERE title = %s AND source = %s",
-            (title, source),
+            "SELECT id FROM documents WHERE content_hash = %s",
+            (content_hash,),
         ).fetchone()
         return existing[0], False
 
@@ -524,9 +552,26 @@ def search_recall(query: str, limit: int = 5, thread_id: str | None = None) -> l
     # Cross-encoder re-ranking
     try:
         from agent.storage.reranker import rerank
-        results = rerank(query, results, top_k=int(limit))
+        results = rerank(query, results, top_k=int(limit) * 2)
     except Exception:
-        results = results[: int(limit)]
+        results = results[: int(limit) * 2]
+
+    # Dedup by content similarity — keep higher-scored entry
+    deduped = []
+    for r in results:
+        r_words = set(r["content"].split())
+        is_dup = False
+        for kept in deduped:
+            kept_words = set(kept["content"].split())
+            if not r_words or not kept_words:
+                continue
+            overlap = len(r_words & kept_words) / min(len(r_words), len(kept_words))
+            if overlap > 0.8:
+                is_dup = True
+                break
+        if not is_dup:
+            deduped.append(r)
+    results = deduped[: int(limit)]
 
     return results
 

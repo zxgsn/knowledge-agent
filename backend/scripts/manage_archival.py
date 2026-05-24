@@ -12,6 +12,8 @@ Usage:
   python scripts/manage_archival.py drop --namespace locomo_baseline       # Delete all entries in namespace
   python scripts/manage_archival.py smart-dedup -n research       # LLM-assisted dedup (dry run)
   python scripts/manage_archival.py smart-dedup -n research --apply  # LLM-assisted dedup (execute)
+  python scripts/manage_archival.py dedup-docs                    # Deduplicate documents by content hash (dry run)
+  python scripts/manage_archival.py dedup-docs --apply            # Deduplicate documents by content hash (execute)
 """
 from __future__ import annotations
 
@@ -565,6 +567,113 @@ def cmd_smart_dedup(args):
 
 
 # ============================================================
+# Document Dedup — clean duplicate documents by content hash
+# ============================================================
+
+def cmd_dedup_docs(args):
+    """Find and remove duplicate documents and orphaned ingested chunks."""
+    apply = args.apply
+    conn = get_conn()
+
+    # Ensure content_hash column exists
+    conn.execute("""
+        DO $$
+        BEGIN
+            IF NOT EXISTS (
+                SELECT 1 FROM information_schema.columns
+                WHERE table_name = 'documents' AND column_name = 'content_hash'
+            ) THEN
+                ALTER TABLE documents ADD COLUMN content_hash TEXT;
+                UPDATE documents SET content_hash = encode(sha256(convert_to(content_full, 'UTF8')), 'hex')
+                    WHERE content_hash IS NULL;
+                ALTER TABLE documents ALTER COLUMN content_hash SET NOT NULL;
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_documents_content_hash ON documents (content_hash);
+            END IF;
+        END$$;
+    """)
+    conn.commit()
+
+    total_deleted_docs = 0
+    total_deleted_chunks = 0
+
+    # --- Part 1: Duplicate documents by content_hash ---
+    rows = conn.execute("""
+        SELECT content_hash, array_agg(id ORDER BY created_at) AS ids,
+               array_agg(title ORDER BY created_at) AS titles,
+               array_agg(created_at ORDER BY created_at) AS dates,
+               COUNT(*) AS cnt
+        FROM documents
+        GROUP BY content_hash
+        HAVING COUNT(*) > 1
+        ORDER BY cnt DESC
+    """).fetchall()
+
+    if rows:
+        total_dup_docs = sum(r[4] - 1 for r in rows)
+        print(f"  [Documents] Found {len(rows)} content groups with duplicates ({total_dup_docs} to remove).\n")
+
+        for content_hash, ids, titles, dates, cnt in rows:
+            print(f"  Content hash: {content_hash[:16]}... ({cnt} copies)")
+            for i, (doc_id, title, date) in enumerate(zip(ids, titles, dates)):
+                tag = "KEEP" if i == 0 else "DELETE"
+                print(f"    [{tag}] {title} (created {date}, id={doc_id[:12]}...)")
+            print()
+
+        if apply:
+            for content_hash, ids, titles, dates, cnt in rows:
+                for doc_id in ids[1:]:
+                    result = conn.execute(
+                        "DELETE FROM archival_memory WHERE document_id = %s", (doc_id,)
+                    )
+                    total_deleted_chunks += result.rowcount
+                    conn.execute("DELETE FROM documents WHERE id = %s", (doc_id,))
+                    total_deleted_docs += 1
+    else:
+        print("  [Documents] No duplicate documents found.\n")
+
+    # --- Part 2: Orphaned ingested chunks (document_id IS NULL) with matching content ---
+    orphan_count = conn.execute("""
+        SELECT COUNT(*) FROM archival_memory
+        WHERE namespace = 'ingested' AND document_id IS NULL
+    """).fetchone()[0]
+
+    if orphan_count > 0:
+        matched = conn.execute("""
+            SELECT COUNT(*) FROM archival_memory o
+            WHERE o.namespace = 'ingested' AND o.document_id IS NULL
+            AND EXISTS (
+                SELECT 1 FROM archival_memory l
+                WHERE l.namespace = 'ingested' AND l.document_id IS NOT NULL
+                AND l.content = o.content
+            )
+        """).fetchone()[0]
+
+        print(f"  [Ingested Chunks] Found {orphan_count} orphaned entries (no document_id).")
+        print(f"  [Ingested Chunks] {matched} have matching content in linked entries — safe to delete.\n")
+
+        if apply and matched > 0:
+            result = conn.execute("""
+                DELETE FROM archival_memory o
+                WHERE o.namespace = 'ingested' AND o.document_id IS NULL
+                AND EXISTS (
+                    SELECT 1 FROM archival_memory l
+                    WHERE l.namespace = 'ingested' AND l.document_id IS NOT NULL
+                    AND l.content = o.content
+                )
+            """)
+            total_deleted_chunks += result.rowcount
+    else:
+        print("  [Ingested Chunks] No orphaned entries found.\n")
+
+    if apply:
+        conn.commit()
+        print(f"  Total: deleted {total_deleted_docs} documents and {total_deleted_chunks} archival chunks.")
+    else:
+        print("  Dry run. Use --apply to execute deletion.")
+    conn.close()
+
+
+# ============================================================
 # Main
 # ============================================================
 
@@ -612,6 +721,11 @@ if __name__ == "__main__":
     p_smart.add_argument("--apply", action="store_true",
                          help="Execute merges (default is dry run)")
 
+    # dedup-docs
+    p_ddocs = sub.add_parser("dedup-docs", help="Remove duplicate documents by content hash")
+    p_ddocs.add_argument("--apply", action="store_true",
+                         help="Execute deletion (default is dry run)")
+
     args = parser.parse_args()
 
     if not args.command:
@@ -620,4 +734,4 @@ if __name__ == "__main__":
 
     {"stats": cmd_stats, "list": cmd_list, "dedup": cmd_dedup,
      "cleanup": cmd_cleanup, "drop": cmd_drop, "consolidate": cmd_consolidate,
-     "smart-dedup": cmd_smart_dedup}[args.command](args)
+     "smart-dedup": cmd_smart_dedup, "dedup-docs": cmd_dedup_docs}[args.command](args)
