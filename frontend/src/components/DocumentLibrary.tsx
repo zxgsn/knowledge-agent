@@ -267,6 +267,16 @@ export function DocumentLibrary() {
     } catch { /* ignore */ }
   }, [handleRefresh]);
 
+  const handleDeleteVersion = useCallback(async (versionId: string) => {
+    if (!window.confirm("Delete this version record?")) return;
+    try {
+      const res = await fetch(`${API_BASE}/api/archival/versions/${versionId}`, { method: "DELETE" });
+      if (res.ok) {
+        setVersions((prev) => prev.filter((v) => v.version_id !== versionId));
+      }
+    } catch { /* ignore */ }
+  }, []);
+
   const handleResolveConflict = useCallback(async (reviewId: string, action: string, resolutionText?: string) => {
     try {
       const res = await fetch(`${API_BASE}/api/conflicts/${reviewId}/resolve`, {
@@ -418,6 +428,7 @@ export function DocumentLibrary() {
         setEditingEntryId(null);
         setFormContent("");
         setFormMetadata("{}");
+        if (showVersionsFor === entryId) fetchVersions(entryId);
       } else {
         alert(`Update failed (${res.status}): ${await res.text()}`);
       }
@@ -954,6 +965,17 @@ export function DocumentLibrary() {
                                           }}
                                         >
                                           Restore
+                                        </Button>
+                                        <Button
+                                          variant="ghost"
+                                          size="sm"
+                                          className="h-5 text-[10px] text-red-400 hover:text-red-300"
+                                          onClick={(e) => {
+                                            e.stopPropagation();
+                                            handleDeleteVersion(v.version_id);
+                                          }}
+                                        >
+                                          <Trash2 className="w-3 h-3" />
                                         </Button>
                                       </div>
                                     ))}

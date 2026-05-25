@@ -398,6 +398,16 @@ def get_version_history(entry_id: str) -> list[dict]:
     return results
 
 
+def delete_version(version_id: str) -> bool:
+    """Delete a single version snapshot."""
+    with get_conn() as conn:
+        result = conn.execute(
+            "DELETE FROM archival_versions WHERE id = %s", (version_id,)
+        )
+        conn.commit()
+        return result.rowcount > 0
+
+
 def rollback_to_version(entry_id: str, version_number: int) -> bool:
     """Restore an archival entry to a specific version."""
     with get_conn() as conn:
@@ -409,23 +419,25 @@ def rollback_to_version(entry_id: str, version_number: int) -> bool:
         if not version_row:
             return False
 
+        meta = version_row[1] if isinstance(version_row[1], str) else json.dumps(version_row[1])
+
         current = conn.execute(
             "SELECT status FROM archival_memory WHERE id = %s", (entry_id,)
         ).fetchone()
         if current:
             _snapshot_version(conn, entry_id, "rollback", "user_rollback")
             conn.execute(
-                "UPDATE archival_memory SET content = %s, metadata = %s, embedding = %s, "
+                "UPDATE archival_memory SET content = %s, metadata = %s::jsonb, embedding = %s, "
                 "status = 'active' WHERE id = %s",
-                (version_row[0], version_row[1], version_row[2], entry_id),
+                (version_row[0], meta, version_row[2], entry_id),
             )
         else:
             conn.execute(
                 "INSERT INTO archival_memory (id, content, metadata, embedding, status) "
-                "VALUES (%s, %s, %s, %s, 'active') ON CONFLICT (id) DO UPDATE SET "
+                "VALUES (%s, %s, %s::jsonb, %s, 'active') ON CONFLICT (id) DO UPDATE SET "
                 "content=EXCLUDED.content, metadata=EXCLUDED.metadata, "
                 "embedding=EXCLUDED.embedding, status='active'",
-                (entry_id, version_row[0], version_row[1], version_row[2]),
+                (entry_id, version_row[0], meta, version_row[2]),
             )
         conn.commit()
     return True

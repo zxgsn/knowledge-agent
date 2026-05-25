@@ -493,6 +493,18 @@ def rollback_entry(entry_id: str, version_number: int = Query(...)):
     return {"rolled_back": True, "entry_id": entry_id, "to_version": version_number}
 
 
+@app.delete("/api/archival/versions/{version_id}")
+def delete_version_entry(version_id: str):
+    from fastapi import HTTPException
+
+    from agent.db import delete_version
+
+    success = delete_version(version_id)
+    if not success:
+        raise HTTPException(status_code=404, detail="Version not found")
+    return {"deleted": True, "version_id": version_id}
+
+
 # --- Conflict Review endpoints ---
 
 
