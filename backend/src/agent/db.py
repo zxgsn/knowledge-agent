@@ -337,7 +337,7 @@ def update_archival(
     with get_conn() as conn:
         _snapshot_version(conn, entry_id, "update", changed_by)
         conn.execute(
-            "UPDATE archival_memory SET content = %s, metadata = %s, embedding = %s WHERE id = %s",
+            "UPDATE archival_memory SET content = %s, metadata = %s, embedding = %s, created_at = NOW() WHERE id = %s",
             (content, json.dumps(metadata), embedding, entry_id),
         )
         conn.commit()
