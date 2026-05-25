@@ -234,6 +234,24 @@ export function DocumentLibrary() {
     } catch { /* ignore */ }
   }, []);
 
+  const fetchConflicts = useCallback(async () => {
+    try {
+      const res = await fetch(`${API_BASE}/api/conflicts?limit=50`);
+      if (res.ok) setConflicts(await res.json());
+    } catch { /* ignore */ }
+  }, []);
+
+  const handleRefresh = useCallback(() => {
+    fetchStats();
+    if (activeTab === "ingested") {
+      fetchDocuments();
+    } else if (activeTab === "conflicts") {
+      fetchConflicts();
+    } else {
+      fetchEntries();
+    }
+  }, [activeTab, fetchStats, fetchDocuments, fetchEntries, fetchConflicts]);
+
   const handleRollback = useCallback(async (entryId: string, versionNumber: number) => {
     if (!window.confirm(`Rollback to version ${versionNumber}?`)) return;
     try {
@@ -248,13 +266,6 @@ export function DocumentLibrary() {
       }
     } catch { /* ignore */ }
   }, [handleRefresh]);
-
-  const fetchConflicts = useCallback(async () => {
-    try {
-      const res = await fetch(`${API_BASE}/api/conflicts?limit=50`);
-      if (res.ok) setConflicts(await res.json());
-    } catch { /* ignore */ }
-  }, []);
 
   const handleResolveConflict = useCallback(async (reviewId: string, action: string, resolutionText?: string) => {
     try {
@@ -292,17 +303,6 @@ export function DocumentLibrary() {
       fetchEntries();
     }
   }, [activeTab, search, fetchDocuments, fetchEntries, fetchConflicts]);
-
-  const handleRefresh = () => {
-    fetchStats();
-    if (activeTab === "ingested") {
-      fetchDocuments();
-    } else if (activeTab === "conflicts") {
-      fetchConflicts();
-    } else {
-      fetchEntries();
-    }
-  };
 
   const handleDocClick = (doc: DocumentSummary) => {
     if (selectedDoc?.id === doc.id) {
