@@ -203,6 +203,17 @@ knowledge-agent/
 ## Roadmap
 
 - **Edit support for all namespaces** — Currently only `manual` entries can be edited from the Document Library UI. Extend inline edit to `ingested`, `research`, and other archival namespaces.
+- **Version diff view** — Side-by-side comparison between two archival versions, highlighting added/removed/changed text for easier review.
+- **Bulk conflict resolution** — Allow approving or rejecting multiple pending conflict reviews at once, with a batch action UI.
+- **Recall & Core Memory version tracking** — Extend the snapshot-before-mutate pattern to Recall memory and Core Memory blocks, enabling full rollback across all three tiers.
+- **Memory analytics dashboard** — Visualize memory quality metrics: total entries by namespace, conflict resolution rate, version history depth, source trust distribution, and storage growth over time.
+- **Automated source credibility** — Auto-detect source reliability from content patterns (e.g., peer-reviewed papers, official docs vs. blog posts) instead of relying solely on the `metadata.source` field.
+- **Context engineering improvements**:
+  - **Token budget management** — Count and cap total tokens injected into the LLM (history, retrieval results, system prompt) to prevent context window overflow.
+  - **Message summarization** — Compress early conversation turns into summaries, keeping only recent turns as raw text, to avoid context loss or token waste in long conversations.
+  - **Retrieval dedup & conflict resolution** — Deduplicate Archival and Recall results before injection; annotate or resolve conflicting information.
+  - **Context source attribution** — Attach structured metadata (source, timestamp, confidence) to injected retrieval results so the LLM can judge reliability and recency.
+  - **Dynamic context allocation** — Adjust retrieval and injection volume based on query complexity: fewer results for simple questions, more for complex ones.
 
 ## Acknowledgments
 

@@ -117,7 +117,7 @@ def search_archival(
                          + (1 - %s) * LEAST(1, ts_rank(content_tsv, plainto_tsquery('{_TS_CONFIG}', %s)) * 5)
                        AS score
                 FROM archival_memory
-                WHERE 1 - (embedding <=> %s::vector) > 0.15
+                WHERE status = 'active' AND 1 - (embedding <=> %s::vector) > 0.15
                 ORDER BY score DESC
                 LIMIT %s
                 """,
@@ -172,6 +172,7 @@ def search_archival_for_dedup(
                        1 - (embedding <=> %s::vector) AS score
                 FROM archival_memory
                 WHERE namespace = %s
+                  AND status = 'active'
                   AND 1 - (embedding <=> %s::vector) > 0.5
                 ORDER BY score DESC
                 LIMIT %s
@@ -320,8 +321,10 @@ def insert_document(
         return existing[0], False
 
 
-def update_archival(entry_id: str, content: str, metadata: dict) -> None:
-    """Update an existing archival entry's content and embedding."""
+def update_archival(
+    entry_id: str, content: str, metadata: dict, changed_by: str = "memory_pipeline"
+) -> None:
+    """Update an existing archival entry's content and embedding. Snapshots before mutation."""
     from pgvector import Vector
 
     from agent.storage import get_embeddings
@@ -329,9 +332,10 @@ def update_archival(entry_id: str, content: str, metadata: dict) -> None:
     embeddings = get_embeddings()
     embedding = Vector(embeddings.embed_query(content))
     metadata["timestamp"] = datetime.now(timezone.utc).isoformat()
-    metadata["updated_by"] = "memory_pipeline"
+    metadata["updated_by"] = changed_by
 
     with get_conn() as conn:
+        _snapshot_version(conn, entry_id, "update", changed_by)
         conn.execute(
             "UPDATE archival_memory SET content = %s, metadata = %s, embedding = %s WHERE id = %s",
             (content, json.dumps(metadata), embedding, entry_id),
@@ -339,10 +343,230 @@ def update_archival(entry_id: str, content: str, metadata: dict) -> None:
         conn.commit()
 
 
-def delete_archival(entry_id: str) -> bool:
-    """Delete an archival entry by ID."""
+# --- Version History ---
+
+
+def _snapshot_version(
+    conn,
+    entry_id: str,
+    change_type: str,
+    changed_by: str = "memory_pipeline",
+) -> None:
+    """Snapshot the current state of an archival entry before mutation."""
+    row = conn.execute(
+        "SELECT content, metadata, embedding FROM archival_memory WHERE id = %s",
+        (entry_id,),
+    ).fetchone()
+    if not row:
+        return
+
+    max_ver = conn.execute(
+        "SELECT COALESCE(MAX(version_number), 0) FROM archival_versions WHERE archival_id = %s",
+        (entry_id,),
+    ).fetchone()[0]
+
+    version_id = str(uuid.uuid4())
+    conn.execute(
+        "INSERT INTO archival_versions (id, archival_id, content, metadata, embedding, "
+        "version_number, change_type, changed_by) "
+        "VALUES (%s, %s, %s, %s, %s, %s, %s, %s)",
+        (version_id, entry_id, row[0], row[1], row[2], max_ver + 1, change_type, changed_by),
+    )
+
+
+def get_version_history(entry_id: str) -> list[dict]:
+    """Get all version snapshots for an archival entry, newest first."""
     with get_conn() as conn:
-        result = conn.execute("DELETE FROM archival_memory WHERE id = %s", (entry_id,))
+        rows = conn.execute(
+            "SELECT id, content, metadata, version_number, change_type, changed_by, created_at::text "
+            "FROM archival_versions WHERE archival_id = %s ORDER BY version_number DESC",
+            (entry_id,),
+        ).fetchall()
+    results = []
+    for row in rows:
+        meta = row[2] if isinstance(row[2], dict) else json.loads(row[2])
+        results.append({
+            "version_id": row[0],
+            "content": row[1],
+            "metadata": meta,
+            "version_number": row[3],
+            "change_type": row[4],
+            "changed_by": row[5],
+            "created_at": row[6],
+        })
+    return results
+
+
+def rollback_to_version(entry_id: str, version_number: int) -> bool:
+    """Restore an archival entry to a specific version."""
+    with get_conn() as conn:
+        version_row = conn.execute(
+            "SELECT content, metadata, embedding FROM archival_versions "
+            "WHERE archival_id = %s AND version_number = %s",
+            (entry_id, version_number),
+        ).fetchone()
+        if not version_row:
+            return False
+
+        current = conn.execute(
+            "SELECT status FROM archival_memory WHERE id = %s", (entry_id,)
+        ).fetchone()
+        if current:
+            _snapshot_version(conn, entry_id, "rollback", "user_rollback")
+            conn.execute(
+                "UPDATE archival_memory SET content = %s, metadata = %s, embedding = %s, "
+                "status = 'active' WHERE id = %s",
+                (version_row[0], version_row[1], version_row[2], entry_id),
+            )
+        else:
+            conn.execute(
+                "INSERT INTO archival_memory (id, content, metadata, embedding, status) "
+                "VALUES (%s, %s, %s, %s, 'active') ON CONFLICT (id) DO UPDATE SET "
+                "content=EXCLUDED.content, metadata=EXCLUDED.metadata, "
+                "embedding=EXCLUDED.embedding, status='active'",
+                (entry_id, version_row[0], version_row[1], version_row[2]),
+            )
+        conn.commit()
+    return True
+
+
+# --- Conflict Review ---
+
+
+def queue_conflict_review(
+    new_fact: str,
+    existing_id: str,
+    existing_content: str,
+    similarity_score: float,
+    llm_decision: str | None,
+    llm_merged_text: str | None,
+    llm_confidence: float | None,
+) -> str:
+    """Queue a low-confidence conflict for human review."""
+    review_id = str(uuid.uuid4())
+    with get_conn() as conn:
+        conn.execute(
+            "INSERT INTO conflict_reviews (id, new_fact, existing_id, existing_content, "
+            "similarity_score, llm_decision, llm_merged_text, llm_confidence) "
+            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s)",
+            (review_id, new_fact, existing_id, existing_content,
+             similarity_score, llm_decision, llm_merged_text, llm_confidence),
+        )
+        conn.commit()
+    return review_id
+
+
+def get_pending_conflicts(limit: int = 20) -> list[dict]:
+    """Get pending conflict reviews for human resolution."""
+    with get_conn() as conn:
+        rows = conn.execute(
+            "SELECT id, new_fact, existing_id, existing_content, similarity_score, "
+            "llm_decision, llm_merged_text, llm_confidence, created_at::text "
+            "FROM conflict_reviews WHERE status = 'pending' ORDER BY created_at DESC LIMIT %s",
+            (limit,),
+        ).fetchall()
+    return [
+        {
+            "id": r[0], "new_fact": r[1], "existing_id": r[2],
+            "existing_content": r[3], "similarity_score": float(r[4]),
+            "llm_decision": r[5], "llm_merged_text": r[6],
+            "llm_confidence": float(r[7]) if r[7] else None,
+            "created_at": r[8],
+        }
+        for r in rows
+    ]
+
+
+def resolve_conflict(
+    review_id: str, action: str, resolution_text: str | None = None
+) -> bool:
+    """Resolve a conflict review. action: 'approve' | 'reject' | 'modify'."""
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT llm_decision, llm_merged_text, existing_id "
+            "FROM conflict_reviews WHERE id = %s AND status = 'pending'",
+            (review_id,),
+        ).fetchone()
+        if not row:
+            return False
+
+        conn.execute(
+            "UPDATE conflict_reviews SET status = %s, resolution_text = %s, resolved_at = NOW() "
+            "WHERE id = %s",
+            (action, resolution_text, review_id),
+        )
+
+        if action == "approve":
+            merged = resolution_text or row[1]
+            if row[0] == "update" and merged:
+                _snapshot_version(conn, row[2], "update", "conflict_review")
+                from pgvector import Vector
+                from agent.storage import get_embeddings
+                emb = Vector(get_embeddings().embed_query(merged))
+                meta = {"source": "conflict_review", "review_id": review_id}
+                conn.execute(
+                    "UPDATE archival_memory SET content = %s, metadata = %s, embedding = %s "
+                    "WHERE id = %s",
+                    (merged, json.dumps(meta), emb, row[2]),
+                )
+        elif action == "modify":
+            if resolution_text:
+                _snapshot_version(conn, row[2], "update", "conflict_review")
+                from pgvector import Vector
+                from agent.storage import get_embeddings
+                emb = Vector(get_embeddings().embed_query(resolution_text))
+                meta = {"source": "conflict_review", "review_id": review_id}
+                conn.execute(
+                    "UPDATE archival_memory SET content = %s, metadata = %s, embedding = %s "
+                    "WHERE id = %s",
+                    (resolution_text, json.dumps(meta), emb, row[2]),
+                )
+
+        conn.commit()
+    return True
+
+
+# --- Source Trust ---
+
+
+SOURCE_TRUST = {
+    "research_summary": 0.9,
+    "manual": 1.0,
+    "manual_save": 1.0,
+    "manual_edit": 1.0,
+    "conversation": 0.7,
+    "memory_pipeline": 0.7,
+    "consolidation": 0.8,
+    "session_window": 0.5,
+    "ingested": 0.8,
+    "conflict_review": 0.9,
+}
+
+
+def get_source_trust(metadata: dict) -> tuple[float, str]:
+    """Return (score, label) for a memory entry's source."""
+    source = metadata.get("source", "unknown")
+    score = SOURCE_TRUST.get(source, 0.5)
+    if score >= 0.9:
+        label = "verified"
+    elif score >= 0.7:
+        label = "default"
+    else:
+        label = "low"
+    return score, label
+
+
+# --- Delete (soft-delete) ---
+
+
+def delete_archival(entry_id: str, changed_by: str = "memory_pipeline") -> bool:
+    """Soft-delete an archival entry: snapshot then set status='superseded'."""
+    with get_conn() as conn:
+        _snapshot_version(conn, entry_id, "delete", changed_by)
+        result = conn.execute(
+            "UPDATE archival_memory SET status = 'superseded' WHERE id = %s AND status = 'active'",
+            (entry_id,),
+        )
         conn.commit()
         return result.rowcount > 0
 
@@ -353,7 +577,7 @@ def get_all_facts(namespace: str = "conversation_facts", limit: int = 500) -> li
         with get_conn() as conn:
             rows = conn.execute(
                 "SELECT id, content, metadata, embedding::text FROM archival_memory "
-                "WHERE namespace = %s ORDER BY created_at DESC LIMIT %s",
+                "WHERE namespace = %s AND status = 'active' ORDER BY created_at DESC LIMIT %s",
                 (namespace, int(limit)),
             ).fetchall()
     except Exception:
@@ -386,7 +610,7 @@ def get_existing_memories(
                 """
                 SELECT id, content, metadata
                 FROM archival_memory
-                WHERE namespace = %s
+                WHERE namespace = %s AND status = 'active'
                 ORDER BY embedding <=> %s::vector
                 LIMIT %s
                 """,
@@ -418,25 +642,32 @@ def cleanup_namespace(namespace: str, max_age_days: int) -> int:
 
 
 def cleanup_excess(namespace: str, max_entries: int) -> int:
-    """Keep only the newest max_entries in a namespace. Returns count deleted."""
+    """Keep only the newest max_entries in a namespace. Returns count soft-deleted."""
     try:
         with get_conn() as conn:
             count = conn.execute(
-                "SELECT COUNT(*) FROM archival_memory WHERE namespace = %s", (namespace,)
+                "SELECT COUNT(*) FROM archival_memory WHERE namespace = %s AND status = 'active'",
+                (namespace,),
             ).fetchone()[0]
 
             if count <= max_entries:
                 return 0
 
-            conn.execute(
-                "DELETE FROM archival_memory WHERE id IN ("
-                "  SELECT id FROM archival_memory WHERE namespace = %s "
-                "  ORDER BY created_at ASC LIMIT %s"
-                ")",
+            excess_ids = conn.execute(
+                "SELECT id FROM archival_memory WHERE namespace = %s AND status = 'active' "
+                "ORDER BY created_at ASC LIMIT %s",
                 (namespace, count - max_entries),
-            )
+            ).fetchall()
+
+            for (eid,) in excess_ids:
+                _snapshot_version(conn, eid, "delete", "cleanup_excess")
+                conn.execute(
+                    "UPDATE archival_memory SET status = 'superseded' WHERE id = %s",
+                    (eid,),
+                )
+
             conn.commit()
-            return count - max_entries
+            return len(excess_ids)
     except Exception:
         return 0
 
@@ -447,6 +678,7 @@ def get_recent_archival(limit: int = 5) -> list[dict]:
         with get_conn() as conn:
             rows = conn.execute(
                 "SELECT content, metadata FROM archival_memory "
+                "WHERE status = 'active' "
                 "ORDER BY created_at DESC LIMIT %s",
                 (int(limit),),
             ).fetchall()

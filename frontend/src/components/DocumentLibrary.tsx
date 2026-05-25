@@ -6,7 +6,7 @@ import { Badge } from "@/components/ui/badge";
 import { Card, CardContent } from "@/components/ui/card";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { ScrollArea } from "@/components/ui/scroll-area";
-import { ArrowLeft, Search, BookOpen, MessageSquare, RefreshCw, FileText, ChevronDown, ChevronRight, Trash2, Plus, Pencil } from "lucide-react";
+import { ArrowLeft, Search, BookOpen, MessageSquare, RefreshCw, FileText, ChevronDown, ChevronRight, Trash2, Plus, Pencil, History, ShieldCheck, ShieldAlert, Shield, AlertTriangle } from "lucide-react";
 
 interface ArchivalEntry {
   id: string;
@@ -79,6 +79,39 @@ function truncate(text: string, maxLen: number): string {
   return text.slice(0, maxLen) + "...";
 }
 
+interface VersionEntry {
+  version_id: string;
+  content: string;
+  metadata: Record<string, any>;
+  version_number: number;
+  change_type: string;
+  changed_by: string;
+  created_at: string | null;
+}
+
+interface ConflictReviewItem {
+  id: string;
+  new_fact: string;
+  existing_id: string;
+  existing_content: string;
+  similarity_score: number;
+  llm_decision: string | null;
+  llm_merged_text: string | null;
+  llm_confidence: number | null;
+  created_at: string | null;
+}
+
+function getTrustLabel(source: string): string {
+  const trusted: Record<string, string> = {
+    research_summary: "verified", manual: "verified", manual_save: "verified",
+    manual_edit: "verified", conflict_review: "verified",
+  };
+  const low = new Set(["session_window"]);
+  if (trusted[source]) return "verified";
+  if (low.has(source)) return "low";
+  return "default";
+}
+
 export function DocumentLibrary() {
   const [activeTab, setActiveTab] = useState("all");
   const [search, setSearch] = useState("");
@@ -96,6 +129,11 @@ export function DocumentLibrary() {
   const [editingEntryId, setEditingEntryId] = useState<string | null>(null);
   const [formContent, setFormContent] = useState("");
   const [formMetadata, setFormMetadata] = useState("{}");
+  const [versions, setVersions] = useState<VersionEntry[]>([]);
+  const [showVersionsFor, setShowVersionsFor] = useState<string | null>(null);
+  const [conflicts, setConflicts] = useState<ConflictReviewItem[]>([]);
+  const [conflictEditId, setConflictEditId] = useState<string | null>(null);
+  const [conflictEditText, setConflictEditText] = useState("");
 
   const fetchStats = useCallback(async () => {
     try {
@@ -186,6 +224,53 @@ export function DocumentLibrary() {
     setLoading(false);
   }, [activeTab, search]);
 
+  const fetchVersions = useCallback(async (entryId: string) => {
+    try {
+      const res = await fetch(`${API_BASE}/api/archival/entries/${entryId}/versions`);
+      if (res.ok) {
+        setVersions(await res.json());
+        setShowVersionsFor(entryId);
+      }
+    } catch { /* ignore */ }
+  }, []);
+
+  const handleRollback = useCallback(async (entryId: string, versionNumber: number) => {
+    if (!window.confirm(`Rollback to version ${versionNumber}?`)) return;
+    try {
+      const res = await fetch(
+        `${API_BASE}/api/archival/entries/${entryId}/rollback?version_number=${versionNumber}`,
+        { method: "POST" }
+      );
+      if (res.ok) {
+        setShowVersionsFor(null);
+        setVersions([]);
+        handleRefresh();
+      }
+    } catch { /* ignore */ }
+  }, [handleRefresh]);
+
+  const fetchConflicts = useCallback(async () => {
+    try {
+      const res = await fetch(`${API_BASE}/api/conflicts?limit=50`);
+      if (res.ok) setConflicts(await res.json());
+    } catch { /* ignore */ }
+  }, []);
+
+  const handleResolveConflict = useCallback(async (reviewId: string, action: string, resolutionText?: string) => {
+    try {
+      const res = await fetch(`${API_BASE}/api/conflicts/${reviewId}/resolve`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action, resolution_text: resolutionText }),
+      });
+      if (res.ok) {
+        setConflicts((prev) => prev.filter((c) => c.id !== reviewId));
+        setConflictEditId(null);
+        setConflictEditText("");
+      }
+    } catch { /* ignore */ }
+  }, []);
+
   const HIDDEN_NAMESPACES = [
     "locomo_baseline", "locomo_context", "locomo_extracted",
     "locomo_bench_baseline", "locomo_bench_context",
@@ -201,15 +286,19 @@ export function DocumentLibrary() {
   useEffect(() => {
     if (activeTab === "ingested") {
       fetchDocuments();
+    } else if (activeTab === "conflicts") {
+      fetchConflicts();
     } else {
       fetchEntries();
     }
-  }, [activeTab, search, fetchDocuments, fetchEntries]);
+  }, [activeTab, search, fetchDocuments, fetchEntries, fetchConflicts]);
 
   const handleRefresh = () => {
     fetchStats();
     if (activeTab === "ingested") {
       fetchDocuments();
+    } else if (activeTab === "conflicts") {
+      fetchConflicts();
     } else {
       fetchEntries();
     }
@@ -396,6 +485,15 @@ export function DocumentLibrary() {
               <MessageSquare className="w-3.5 h-3.5 mr-1" />
               Recall
             </TabsTrigger>
+            <TabsTrigger value="conflicts">
+              <AlertTriangle className="w-3.5 h-3.5 mr-1" />
+              Conflicts
+              {conflicts.length > 0 && (
+                <Badge className="ml-1 bg-amber-600 text-white text-[10px] px-1 py-0">
+                  {conflicts.length}
+                </Badge>
+              )}
+            </TabsTrigger>
           </TabsList>
 
           <div className="flex-1 min-h-0 mt-3">
@@ -550,6 +648,103 @@ export function DocumentLibrary() {
                     ))}
                   </div>
                 )
+              ) : activeTab === "conflicts" ? (
+                conflicts.length === 0 ? (
+                  <div className="text-center text-neutral-500 py-12">No pending conflicts.</div>
+                ) : (
+                  <div className="grid gap-3">
+                    {conflicts.map((conflict) => (
+                      <Card key={conflict.id} className="bg-neutral-700 border-amber-600/30">
+                        <CardContent className="p-3 space-y-2">
+                          <div className="flex items-center gap-2">
+                            <AlertTriangle className="w-4 h-4 text-amber-400" />
+                            <span className="text-xs text-neutral-400">
+                              Similarity: {(conflict.similarity_score * 100).toFixed(0)}%
+                            </span>
+                            {conflict.llm_confidence !== null && (
+                              <Badge variant="outline" className={`text-[10px] px-1 py-0 ${
+                                conflict.llm_confidence >= 0.7
+                                  ? "border-emerald-600 text-emerald-400"
+                                  : "border-yellow-600 text-yellow-400"
+                              }`}>
+                                confidence: {conflict.llm_confidence.toFixed(2)}
+                              </Badge>
+                            )}
+                            {conflict.llm_decision && (
+                              <Badge variant="outline" className="text-[10px] px-1 py-0 border-neutral-600 text-neutral-400">
+                                LLM: {conflict.llm_decision}
+                              </Badge>
+                            )}
+                            <span className="text-xs text-neutral-500 ml-auto">
+                              {timeAgo(conflict.created_at)}
+                            </span>
+                          </div>
+
+                          <div className="grid grid-cols-2 gap-2">
+                            <div className="bg-neutral-800 rounded p-2">
+                              <p className="text-[10px] text-emerald-400 mb-1">New Fact</p>
+                              <p className="text-xs text-neutral-200">{conflict.new_fact}</p>
+                            </div>
+                            <div className="bg-neutral-800 rounded p-2">
+                              <p className="text-[10px] text-sky-400 mb-1">Existing Memory</p>
+                              <p className="text-xs text-neutral-200">{conflict.existing_content}</p>
+                            </div>
+                          </div>
+
+                          {conflict.llm_merged_text && (
+                            <div className="bg-neutral-800 rounded p-2">
+                              <p className="text-[10px] text-purple-400 mb-1">LLM Proposed Merge</p>
+                              <p className="text-xs text-neutral-200">{conflict.llm_merged_text}</p>
+                            </div>
+                          )}
+
+                          {conflictEditId === conflict.id ? (
+                            <div className="space-y-2">
+                              <textarea
+                                value={conflictEditText}
+                                onChange={(e) => setConflictEditText(e.target.value)}
+                                placeholder="Modified text (optional for approve, required for modify)..."
+                                className="w-full bg-neutral-800 text-neutral-200 text-sm rounded p-2 min-h-[60px] resize-y border border-neutral-600 focus:border-amber-600 outline-none"
+                              />
+                              <div className="flex gap-2 justify-end">
+                                <Button variant="ghost" size="sm" className="text-neutral-400"
+                                  onClick={() => { setConflictEditId(null); setConflictEditText(""); }}>
+                                  Cancel
+                                </Button>
+                                <Button size="sm" className="bg-emerald-600 hover:bg-emerald-700 text-white"
+                                  onClick={() => handleResolveConflict(conflict.id, "approve", conflictEditText || undefined)}>
+                                  Approve with Edit
+                                </Button>
+                                <Button size="sm" className="bg-blue-600 hover:bg-blue-700 text-white"
+                                  onClick={() => handleResolveConflict(conflict.id, "modify", conflictEditText)}>
+                                  Save as Modified
+                                </Button>
+                              </div>
+                            </div>
+                          ) : (
+                            <div className="flex gap-2 justify-end">
+                              <Button size="sm" className="bg-emerald-600 hover:bg-emerald-700 text-white"
+                                onClick={() => handleResolveConflict(conflict.id, "approve")}>
+                                Approve
+                              </Button>
+                              <Button size="sm" variant="outline" className="border-neutral-600 text-neutral-300"
+                                onClick={() => {
+                                  setConflictEditId(conflict.id);
+                                  setConflictEditText(conflict.llm_merged_text || conflict.new_fact);
+                                }}>
+                                Modify
+                              </Button>
+                              <Button size="sm" variant="outline" className="border-red-600 text-red-400 hover:bg-red-600/10"
+                                onClick={() => handleResolveConflict(conflict.id, "reject")}>
+                                Reject
+                              </Button>
+                            </div>
+                          )}
+                        </CardContent>
+                      </Card>
+                    ))}
+                  </div>
+                )
               ) : activeTab !== "manual" && visibleEntries.length === 0 && recallEntries.length === 0 ? (
                 <div className="text-center text-neutral-500 py-12">No entries found.</div>
               ) : (
@@ -621,6 +816,22 @@ export function DocumentLibrary() {
                             <span className="text-xs text-neutral-500">
                               {entry.metadata.source}
                             </span>
+                          )}
+                          {entry.metadata?.source && (
+                            <Badge variant="outline" className={`text-[10px] px-1 py-0 ${
+                              getTrustLabel(entry.metadata.source) === "verified"
+                                ? "border-emerald-600 text-emerald-400"
+                                : getTrustLabel(entry.metadata.source) === "low"
+                                  ? "border-yellow-600 text-yellow-400"
+                                  : "border-neutral-600 text-neutral-500"
+                            }`}>
+                              {getTrustLabel(entry.metadata.source) === "verified"
+                                ? <ShieldCheck className="w-2.5 h-2.5 mr-0.5 inline" />
+                                : getTrustLabel(entry.metadata.source) === "low"
+                                  ? <ShieldAlert className="w-2.5 h-2.5 mr-0.5 inline" />
+                                  : <Shield className="w-2.5 h-2.5 mr-0.5 inline" />}
+                              {getTrustLabel(entry.metadata.source)}
+                            </Badge>
                           )}
                           {entry.metadata?.document && (
                             <span className="text-xs text-neutral-500">
@@ -696,6 +907,61 @@ export function DocumentLibrary() {
                                 <pre className="text-xs text-neutral-400 whitespace-pre-wrap break-all">
                                   {JSON.stringify(entry.metadata, null, 2)}
                                 </pre>
+                              </div>
+                            )}
+                            {selectedEntry?.id === entry.id && (
+                              <div className="mt-2">
+                                <Button
+                                  variant="ghost"
+                                  size="sm"
+                                  className="text-xs text-neutral-400 hover:text-neutral-200 h-6"
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    if (showVersionsFor === entry.id) {
+                                      setShowVersionsFor(null);
+                                      setVersions([]);
+                                    } else {
+                                      fetchVersions(entry.id);
+                                    }
+                                  }}
+                                >
+                                  <History className="w-3 h-3 mr-1" />
+                                  {showVersionsFor === entry.id ? "Hide History" : "Version History"}
+                                </Button>
+                                {showVersionsFor === entry.id && versions.length > 0 && (
+                                  <div className="mt-2 space-y-1 border-t border-neutral-600 pt-2">
+                                    {versions.map((v) => (
+                                      <div key={v.version_id} className="flex items-center gap-2 text-xs text-neutral-400 bg-neutral-800 rounded p-1.5">
+                                        <span className="text-neutral-300 font-mono">v{v.version_number}</span>
+                                        <Badge variant="outline" className={`text-[10px] px-1 py-0 ${
+                                          v.change_type === "delete"
+                                            ? "border-red-600 text-red-400"
+                                            : v.change_type === "rollback"
+                                              ? "border-blue-600 text-blue-400"
+                                              : "border-neutral-600 text-neutral-400"
+                                        }`}>
+                                          {v.change_type}
+                                        </Badge>
+                                        <span className="flex-1 truncate">{truncate(v.content, 60)}</span>
+                                        <span className="text-neutral-500">{v.changed_by}</span>
+                                        <Button
+                                          variant="ghost"
+                                          size="sm"
+                                          className="h-5 text-[10px] text-amber-400 hover:text-amber-300"
+                                          onClick={(e) => {
+                                            e.stopPropagation();
+                                            handleRollback(entry.id, v.version_number);
+                                          }}
+                                        >
+                                          Restore
+                                        </Button>
+                                      </div>
+                                    ))}
+                                  </div>
+                                )}
+                                {showVersionsFor === entry.id && versions.length === 0 && (
+                                  <p className="text-xs text-neutral-500 mt-1">No version history.</p>
+                                )}
                               </div>
                             )}
                           </>

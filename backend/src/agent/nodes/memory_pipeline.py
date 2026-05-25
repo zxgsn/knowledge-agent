@@ -21,6 +21,7 @@ from agent.db import (
     get_all_facts,
     get_existing_memories,
     put_to_archival,
+    queue_conflict_review,
     search_archival_for_dedup,
     update_archival,
 )
@@ -130,7 +131,9 @@ async def memory_pipeline(state: AgentState, config: RunnableConfig) -> dict:
         }
 
     # Step 4: Conflict resolution for ADD operations
-    operations = await _resolve_conflicts(operations, existing, llm)
+    operations = await _resolve_conflicts(
+        operations, existing, llm, configurable.conflict_confidence_threshold
+    )
 
     # Step 5: Execute operations
     stored_count = 0
@@ -213,16 +216,17 @@ async def _resolve_conflicts(
     operations: list[dict],
     existing: list[dict],
     llm,
+    confidence_threshold: float = 0.7,
 ) -> list[dict]:
     """Check ADD operations against existing memories for conflicts.
 
     Uses FACT_CONFLICT_PROMPT to decide whether an ADD should become
     an UPDATE (merge with existing) or be skipped.
+    Low-confidence decisions are queued for human review.
     """
     if not existing:
         return operations
 
-    existing_map = {m["id"]: m["content"] for m in existing}
     resolved = []
 
     for op in operations:
@@ -237,12 +241,8 @@ async def _resolve_conflicts(
         best_match = None
         best_score = 0.0
         for mem in existing:
-            # Simple heuristic: check if the fact shares significant content
-            # The extraction prompt already provides existing context, so this
-            # is a second-pass refinement for borderline cases
             mem_content = mem["content"]
             common_words = set(text.lower().split()) & set(mem_content.lower().split())
-            # Jaccard-ish similarity on words
             if len(common_words) >= 3:
                 score = len(common_words) / max(len(text.split()), len(mem_content.split()))
                 if score > best_score:
@@ -250,7 +250,6 @@ async def _resolve_conflicts(
                     best_match = mem
 
         if best_match and best_score >= 0.3:
-            # Potential conflict — ask LLM to decide
             prompt = FACT_CONFLICT_PROMPT.format(
                 new_fact=text,
                 existing_fact=best_match["content"],
@@ -260,17 +259,34 @@ async def _resolve_conflicts(
                 response = await llm.ainvoke(prompt)
                 from agent.utils import parse_json
                 decision = parse_json(response.content)
-                if decision.get("decision") == "skip":
-                    op = {**op, "event": "NOOP", "reason": decision.get("reason", "conflict_skip")}
-                elif decision.get("decision") == "update" and decision.get("merged"):
-                    op = {
-                        **op,
-                        "event": "UPDATE",
-                        "id": best_match["id"],
-                        "text": decision["merged"],
-                        "old_memory": best_match["content"],
-                        "reason": decision.get("reason", "conflict_merge"),
-                    }
+                confidence = float(decision.get("confidence", 0.5))
+
+                if confidence >= confidence_threshold:
+                    # High confidence: auto-apply
+                    if decision.get("decision") == "skip":
+                        op = {**op, "event": "NOOP", "reason": decision.get("reason", "conflict_skip")}
+                    elif decision.get("decision") == "update" and decision.get("merged"):
+                        op = {
+                            **op,
+                            "event": "UPDATE",
+                            "id": best_match["id"],
+                            "text": decision["merged"],
+                            "old_memory": best_match["content"],
+                            "reason": decision.get("reason", "conflict_merge"),
+                        }
+                else:
+                    # Low confidence: queue for human review
+                    await asyncio.to_thread(
+                        queue_conflict_review,
+                        new_fact=text,
+                        existing_id=best_match["id"],
+                        existing_content=best_match["content"],
+                        similarity_score=best_score,
+                        llm_decision=decision.get("decision"),
+                        llm_merged_text=decision.get("merged"),
+                        llm_confidence=confidence,
+                    )
+                    op = {**op, "event": "NOOP", "reason": "queued_for_review", "confidence": confidence}
             except Exception:
                 pass  # Keep original ADD if conflict resolution fails
 

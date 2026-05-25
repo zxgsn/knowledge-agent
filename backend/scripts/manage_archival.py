@@ -1,7 +1,8 @@
 """Archival Memory management tool.
 
 Manage research summaries, ingested documents, and other archival entries.
-Supports statistics, listing, deduplication, cleanup, and consolidation.
+Supports statistics, listing, deduplication, cleanup, consolidation,
+version history, and conflict review.
 
 Usage:
   python scripts/manage_archival.py stats                          # Show stats per namespace
@@ -14,6 +15,10 @@ Usage:
   python scripts/manage_archival.py smart-dedup -n research --apply  # LLM-assisted dedup (execute)
   python scripts/manage_archival.py dedup-docs                    # Deduplicate documents by content hash (dry run)
   python scripts/manage_archival.py dedup-docs --apply            # Deduplicate documents by content hash (execute)
+  python scripts/manage_archival.py versions -e <entry-id>        # Show version history for an entry
+  python scripts/manage_archival.py conflicts                     # List pending conflict reviews
+  python scripts/manage_archival.py conflicts -r <review-id>      # Resolve a conflict (default: approve)
+  python scripts/manage_archival.py conflicts -r <review-id> -a reject  # Reject a conflict
 """
 from __future__ import annotations
 
@@ -674,6 +679,123 @@ def cmd_dedup_docs(args):
 
 
 # ============================================================
+# Version History & Conflict Review
+# ============================================================
+
+def cmd_versions(args):
+    """Show version history for an archival entry."""
+    conn = get_conn()
+    entry_id = args.entry_id
+
+    # Show current entry info
+    current = conn.execute(
+        "SELECT namespace, content, status FROM archival_memory WHERE id = %s",
+        (entry_id,),
+    ).fetchone()
+    if current:
+        ns, content, status = current
+        print(f"\n  Entry: {entry_id}")
+        print(f"  Namespace: {ns}  Status: {status}")
+        print(f"  Content: {content[:100]}...")
+    else:
+        print(f"\n  Entry {entry_id} not found (may be hard-deleted).")
+
+    # Show versions
+    rows = conn.execute(
+        "SELECT id, content, version_number, change_type, changed_by, created_at "
+        "FROM archival_versions WHERE archival_id = %s ORDER BY version_number DESC",
+        (entry_id,),
+    ).fetchall()
+
+    if not rows:
+        print("  No version history found.")
+        conn.close()
+        return
+
+    print(f"\n  {'Ver':>4} {'Type':<10} {'Changed By':<20} {'Content Preview':<50} {'Time'}")
+    print("  " + "-" * 100)
+    for vid, content, ver, ctype, changed_by, created in rows:
+        preview = content[:48].replace("\n", " ")
+        if len(content) > 48:
+            preview += "..."
+        age = (datetime.now(timezone.utc) - created.replace(tzinfo=timezone.utc)).days
+        print(f"  v{ver:<3} {ctype:<10} {changed_by:<20} {preview:<50} {format_age(age)} ago")
+    conn.close()
+
+
+def cmd_conflicts(args):
+    """List or resolve pending conflict reviews."""
+    conn = get_conn()
+
+    if args.resolve:
+        # Resolve a specific conflict
+        row = conn.execute(
+            "SELECT id, status FROM conflict_reviews WHERE id = %s",
+            (args.resolve,),
+        ).fetchone()
+        if not row:
+            print(f"  Conflict review {args.resolve} not found.")
+            conn.close()
+            return
+        if row[1] != "pending":
+            print(f"  Conflict review {args.resolve} already resolved as '{row[1]}'.")
+            conn.close()
+            return
+
+        action = args.action or "approve"
+        conn.execute(
+            "UPDATE conflict_reviews SET status = %s, resolved_at = NOW() WHERE id = %s",
+            (action, args.resolve),
+        )
+
+        if action == "approve":
+            merged_row = conn.execute(
+                "SELECT llm_decision, llm_merged_text, existing_id FROM conflict_reviews WHERE id = %s",
+                (args.resolve,),
+            ).fetchone()
+            if merged_row[0] == "update" and merged_row[1]:
+                emb = Vector(get_embeddings().embed_query(merged_row[1]))
+                meta = json.dumps({"source": "conflict_review", "review_id": args.resolve})
+                conn.execute(
+                    "UPDATE archival_memory SET content = %s, metadata = %s, embedding = %s WHERE id = %s",
+                    (merged_row[1], meta, emb, merged_row[2]),
+                )
+                print(f"  Approved and updated existing entry {merged_row[2]}.")
+            else:
+                print(f"  Approved (skip decision — no change to live data).")
+        else:
+            print(f"  Rejected conflict review {args.resolve}.")
+
+        conn.commit()
+        conn.close()
+        return
+
+    # List pending conflicts
+    limit = args.limit
+    rows = conn.execute(
+        "SELECT id, new_fact, existing_id, existing_content, similarity_score, "
+        "llm_decision, llm_confidence, created_at "
+        "FROM conflict_reviews WHERE status = 'pending' ORDER BY created_at DESC LIMIT %s",
+        (limit,),
+    ).fetchall()
+
+    if not rows:
+        print("  No pending conflict reviews.")
+        conn.close()
+        return
+
+    print(f"\n  Pending conflict reviews ({len(rows)}):\n")
+    for i, (rid, new_fact, exist_id, exist_content, sim, decision, conf, created) in enumerate(rows):
+        age = (datetime.now(timezone.utc) - created.replace(tzinfo=timezone.utc)).days
+        conf_str = f"{conf:.2f}" if conf else "N/A"
+        print(f"  [{i+1}] {rid}  sim={sim:.2f}  conf={conf_str}  decision={decision}  ({format_age(age)} ago)")
+        print(f"       NEW: {new_fact[:80]}")
+        print(f"       OLD: {exist_content[:80]}")
+        print()
+    conn.close()
+
+
+# ============================================================
 # Main
 # ============================================================
 
@@ -726,6 +848,17 @@ if __name__ == "__main__":
     p_ddocs.add_argument("--apply", action="store_true",
                          help="Execute deletion (default is dry run)")
 
+    # versions
+    p_ver = sub.add_parser("versions", help="Show version history for an entry")
+    p_ver.add_argument("--entry-id", "-e", required=True, help="Archival entry ID")
+
+    # conflicts
+    p_conf = sub.add_parser("conflicts", help="List or resolve pending conflict reviews")
+    p_conf.add_argument("--limit", "-l", type=int, default=20)
+    p_conf.add_argument("--resolve", "-r", help="Resolve a conflict review by ID")
+    p_conf.add_argument("--action", "-a", choices=["approve", "reject"],
+                        default="approve", help="Action when resolving (default: approve)")
+
     args = parser.parse_args()
 
     if not args.command:
@@ -734,4 +867,5 @@ if __name__ == "__main__":
 
     {"stats": cmd_stats, "list": cmd_list, "dedup": cmd_dedup,
      "cleanup": cmd_cleanup, "drop": cmd_drop, "consolidate": cmd_consolidate,
-     "smart-dedup": cmd_smart_dedup, "dedup-docs": cmd_dedup_docs}[args.command](args)
+     "smart-dedup": cmd_smart_dedup, "dedup-docs": cmd_dedup_docs,
+     "versions": cmd_versions, "conflicts": cmd_conflicts}[args.command](args)

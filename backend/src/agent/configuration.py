@@ -102,6 +102,10 @@ class Configuration(BaseModel):
         default=3,
         metadata={"description": "Number of initial turns to activate proactive memory."},
     )
+    conflict_confidence_threshold: float = Field(
+        default=0.7,
+        metadata={"description": "Confidence threshold below which conflicts are queued for human review."},
+    )
 
     @classmethod
     def from_runnable_config(

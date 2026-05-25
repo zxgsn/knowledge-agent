@@ -41,8 +41,8 @@ class TestSearchArchival:
         mock_get_conn.return_value = _mock_conn_ctx(conn)
         mock_get_emb.return_value = _make_mock_embeddings()
 
-        # Mock DB rows: (content, metadata, score)
-        mock_row = ("test content", json.dumps({"source": "test"}), 0.85)
+        # Mock DB rows: (content, metadata, namespace, score)
+        mock_row = ("test content", json.dumps({"source": "test"}), "research", 0.85)
         conn.execute.return_value.fetchall.return_value = [mock_row]
 
         with patch("agent.storage.reranker.rerank", side_effect=lambda q, r, top_k: r[:top_k]):
@@ -62,7 +62,7 @@ class TestSearchArchival:
         mock_get_conn.return_value = _mock_conn_ctx(conn)
         mock_get_emb.return_value = _make_mock_embeddings()
 
-        mock_row = ("low score content", json.dumps({}), 0.005)
+        mock_row = ("low score content", json.dumps({}), "ns", 0.005)
         conn.execute.return_value.fetchall.return_value = [mock_row]
 
         results = search_archival("test query")
@@ -159,8 +159,9 @@ class TestPutToArchival:
 
 
 class TestInsertDocument:
+    @patch("agent.db._ensure_content_hash_column")
     @patch("agent.db.get_conn")
-    def test_new_document(self, mock_get_conn):
+    def test_new_document(self, mock_get_conn, mock_ensure_hash):
         from agent.db import insert_document
 
         conn = _make_mock_conn()
@@ -175,8 +176,9 @@ class TestInsertDocument:
         assert doc_id == "doc-id-123"
         assert is_new is True
 
+    @patch("agent.db._ensure_content_hash_column")
     @patch("agent.db.get_conn")
-    def test_existing_document(self, mock_get_conn):
+    def test_existing_document(self, mock_get_conn, mock_ensure_hash):
         from agent.db import insert_document
 
         conn = _make_mock_conn()
@@ -259,11 +261,19 @@ class TestUpdateArchival:
         mock_get_conn.return_value = _mock_conn_ctx(conn)
         mock_get_emb.return_value = _make_mock_embeddings()
 
+        # _snapshot_version does 3 execute calls: SELECT content, SELECT MAX(version), INSERT snapshot
+        mock_select = MagicMock()
+        mock_select.fetchone.return_value = ("old content", "{}", "[0.1]")
+        mock_max_ver = MagicMock()
+        mock_max_ver.fetchone.return_value = (0,)
+        conn.execute.side_effect = [mock_select, mock_max_ver, MagicMock(), MagicMock()]
+
         update_archival("entry-id", "new content", {"source": "test"})
-        conn.execute.assert_called_once()
+        assert conn.execute.call_count == 4  # 3 snapshot + 1 update
         conn.commit.assert_called_once()
 
-        sql = conn.execute.call_args[0][0]
+        # Last execute call is the actual UPDATE
+        sql = conn.execute.call_args_list[-1][0][0]
         assert "UPDATE" in sql
 
 
@@ -274,7 +284,15 @@ class TestDeleteArchival:
 
         conn = _make_mock_conn()
         mock_get_conn.return_value = _mock_conn_ctx(conn)
-        conn.execute.return_value.rowcount = 1
+
+        # _snapshot_version: SELECT, SELECT MAX, INSERT; then soft-delete UPDATE
+        mock_select = MagicMock()
+        mock_select.fetchone.return_value = ("content", "{}", "[0.1]")
+        mock_max_ver = MagicMock()
+        mock_max_ver.fetchone.return_value = (0,)
+        mock_update = MagicMock()
+        mock_update.rowcount = 1
+        conn.execute.side_effect = [mock_select, mock_max_ver, MagicMock(), mock_update]
 
         assert delete_archival("entry-id") is True
 
@@ -284,7 +302,14 @@ class TestDeleteArchival:
 
         conn = _make_mock_conn()
         mock_get_conn.return_value = _mock_conn_ctx(conn)
-        conn.execute.return_value.rowcount = 0
+
+        mock_select = MagicMock()
+        mock_select.fetchone.return_value = ("content", "{}", "[0.1]")
+        mock_max_ver = MagicMock()
+        mock_max_ver.fetchone.return_value = (0,)
+        mock_update = MagicMock()
+        mock_update.rowcount = 0
+        conn.execute.side_effect = [mock_select, mock_max_ver, MagicMock(), mock_update]
 
         assert delete_archival("nonexistent") is False
 
@@ -339,7 +364,10 @@ class TestCleanupExcess:
 
         conn = _make_mock_conn()
         mock_get_conn.return_value = _mock_conn_ctx(conn)
-        conn.execute.return_value.fetchone.return_value = (50,)
+
+        mock_count = MagicMock()
+        mock_count.fetchone.return_value = (50,)
+        conn.execute.return_value = mock_count
 
         assert cleanup_excess("ns", 100) == 0
 
@@ -349,7 +377,24 @@ class TestCleanupExcess:
 
         conn = _make_mock_conn()
         mock_get_conn.return_value = _mock_conn_ctx(conn)
-        conn.execute.return_value.fetchone.return_value = (150,)
+
+        mock_count = MagicMock()
+        mock_count.fetchone.return_value = (150,)
+
+        # SELECT id ... LIMIT 50 returns 50 rows
+        mock_select_ids = MagicMock()
+        mock_select_ids.fetchall.return_value = [(f"eid-{i}",) for i in range(50)]
+
+        # Each excess entry: snapshot (SELECT, SELECT MAX, INSERT) + soft-delete UPDATE
+        calls = [mock_count, mock_select_ids]
+        for _ in range(50):
+            mock_snap = MagicMock()
+            mock_snap.fetchone.return_value = ("content", "{}", "[0.1]")
+            mock_max_ver = MagicMock()
+            mock_max_ver.fetchone.return_value = (0,)
+            calls.extend([mock_snap, mock_max_ver, MagicMock(), MagicMock()])
+
+        conn.execute.side_effect = calls
 
         result = cleanup_excess("ns", 100)
         assert result == 50

@@ -113,6 +113,33 @@ class UpdateEntryRequest(BaseModel):
     metadata: dict | None = None
 
 
+class VersionEntry(BaseModel):
+    version_id: str
+    content: str
+    metadata: dict
+    version_number: int
+    change_type: str
+    changed_by: str
+    created_at: str | None
+
+
+class ConflictReview(BaseModel):
+    id: str
+    new_fact: str
+    existing_id: str
+    existing_content: str
+    similarity_score: float
+    llm_decision: str | None
+    llm_merged_text: str | None
+    llm_confidence: float | None
+    created_at: str | None
+
+
+class ResolveConflictRequest(BaseModel):
+    action: str  # "approve" | "reject" | "modify"
+    resolution_text: str | None = None
+
+
 # --- DB helper ---
 
 
@@ -138,6 +165,7 @@ def get_archival_stats():
             SELECT namespace, COUNT(*),
                    MIN(created_at)::text, MAX(created_at)::text
             FROM archival_memory
+            WHERE status = 'active'
             GROUP BY namespace
             ORDER BY COUNT(*) DESC
             """
@@ -162,7 +190,7 @@ def list_archival_entries(
     from agent.storage import get_conn
 
     params: list = []
-    where_clauses: list[str] = []
+    where_clauses: list[str] = ["status = 'active'"]
 
     if namespace:
         where_clauses.append("namespace = %s")
@@ -314,7 +342,8 @@ def get_document(doc_id: str):
         # Fetch associated chunks
         chunk_rows = conn.execute(
             "SELECT id, namespace, content, metadata, created_at::text "
-            "FROM archival_memory WHERE document_id = %s ORDER BY (metadata->>'chunk_index')::int",
+            "FROM archival_memory WHERE document_id = %s AND status = 'active' "
+            "ORDER BY (metadata->>'chunk_index')::int",
             (doc_id,),
         ).fetchall()
 
@@ -442,21 +471,69 @@ def get_core_memory(thread_id: str):
     return CoreMemoryResponse(blocks=blocks, raw=raw)
 
 
+# --- Version History & Rollback endpoints ---
+
+
+@app.get("/api/archival/entries/{entry_id}/versions", response_model=list[VersionEntry])
+def get_entry_versions(entry_id: str):
+    from agent.db import get_version_history
+
+    return [VersionEntry(**v) for v in get_version_history(entry_id)]
+
+
+@app.post("/api/archival/entries/{entry_id}/rollback")
+def rollback_entry(entry_id: str, version_number: int = Query(...)):
+    from fastapi import HTTPException
+
+    from agent.db import rollback_to_version
+
+    success = rollback_to_version(entry_id, version_number)
+    if not success:
+        raise HTTPException(status_code=404, detail="Version not found")
+    return {"rolled_back": True, "entry_id": entry_id, "to_version": version_number}
+
+
+# --- Conflict Review endpoints ---
+
+
+@app.get("/api/conflicts", response_model=list[ConflictReview])
+def list_pending_conflicts(limit: int = Query(default=20, ge=1, le=100)):
+    from agent.db import get_pending_conflicts
+
+    return [ConflictReview(**c) for c in get_pending_conflicts(limit)]
+
+
+@app.post("/api/conflicts/{review_id}/resolve")
+def resolve_conflict_endpoint(review_id: str, req: ResolveConflictRequest):
+    from fastapi import HTTPException
+
+    from agent.db import resolve_conflict
+
+    success = resolve_conflict(review_id, req.action, req.resolution_text)
+    if not success:
+        raise HTTPException(
+            status_code=404, detail="Conflict review not found or already resolved"
+        )
+    return {"resolved": True, "review_id": review_id, "action": req.action}
+
+
 # --- Delete endpoints ---
 
 
 @app.delete("/api/documents/{doc_id}")
 def delete_document(doc_id: str):
-    """Delete a document and all its associated archival chunks."""
+    """Delete a document and soft-delete all its associated archival chunks."""
     from fastapi import HTTPException
 
+    from agent.db import delete_archival
     from agent.storage import get_conn
 
     with get_conn() as conn:
-        # Delete associated chunks first
-        chunk_result = conn.execute(
-            "DELETE FROM archival_memory WHERE document_id = %s", (doc_id,)
-        )
+        # Find associated chunk IDs
+        chunk_rows = conn.execute(
+            "SELECT id FROM archival_memory WHERE document_id = %s AND status = 'active'",
+            (doc_id,),
+        ).fetchall()
         # Delete the document itself
         doc_result = conn.execute(
             "DELETE FROM documents WHERE id = %s", (doc_id,)
@@ -466,27 +543,26 @@ def delete_document(doc_id: str):
     if doc_result.rowcount == 0:
         raise HTTPException(status_code=404, detail="Document not found")
 
+    # Soft-delete each chunk
+    for (chunk_id,) in chunk_rows:
+        delete_archival(chunk_id, changed_by="document_delete")
+
     return {
         "deleted": True,
         "document_id": doc_id,
-        "chunks_deleted": chunk_result.rowcount,
+        "chunks_deleted": len(chunk_rows),
     }
 
 
 @app.delete("/api/archival/entries/{entry_id}")
 def delete_archival_entry(entry_id: str):
-    """Delete a single archival memory entry."""
+    """Soft-delete a single archival memory entry."""
     from fastapi import HTTPException
 
-    from agent.storage import get_conn
+    from agent.db import delete_archival
 
-    with get_conn() as conn:
-        result = conn.execute(
-            "DELETE FROM archival_memory WHERE id = %s", (entry_id,)
-        )
-        conn.commit()
-
-    if result.rowcount == 0:
+    success = delete_archival(entry_id, changed_by="manual_edit")
+    if not success:
         raise HTTPException(status_code=404, detail="Entry not found")
 
     return {"deleted": True, "entry_id": entry_id}
@@ -536,7 +612,7 @@ def update_archival_entry(entry_id: str, req: UpdateEntryRequest):
 
     # Merge metadata: use provided or keep existing
     meta = req.metadata if req.metadata is not None else _parse_meta(existing[0])
-    update_archival(entry_id, req.content, meta)
+    update_archival(entry_id, req.content, meta, changed_by="manual_edit")
 
     with get_conn() as conn:
         row = conn.execute(

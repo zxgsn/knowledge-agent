@@ -165,7 +165,13 @@ Decide:
 - "skip": The existing memory already covers this. No change needed.
 
 Respond with ONLY a JSON object:
-{{"decision": "update|skip", "merged": "merged fact text (only if update)", "reason": "..."}}
+{{"decision": "update|skip", "merged": "merged fact text (only if update)", "confidence": 0.0-1.0, "reason": "..."}}
+
+Confidence scoring:
+- 0.9-1.0: Both facts clearly describe the same thing, merge is obvious
+- 0.7-0.9: Likely the same topic, merge is reasonable
+- 0.5-0.7: Uncertain — could be same or different
+- 0.0-0.5: Probably different facts that happen to share words
 """
 
 SELECTIVE_EXTRACTION_PROMPT = """Extract memory operations from this conversation, considering existing memories.
