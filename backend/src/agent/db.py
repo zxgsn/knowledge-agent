@@ -366,11 +366,12 @@ def _snapshot_version(
     ).fetchone()[0]
 
     version_id = str(uuid.uuid4())
+    meta = row[1] if isinstance(row[1], str) else json.dumps(row[1])
     conn.execute(
         "INSERT INTO archival_versions (id, archival_id, content, metadata, embedding, "
         "version_number, change_type, changed_by) "
-        "VALUES (%s, %s, %s, %s, %s, %s, %s, %s)",
-        (version_id, entry_id, row[0], row[1], row[2], max_ver + 1, change_type, changed_by),
+        "VALUES (%s, %s, %s, %s::jsonb, %s, %s, %s, %s)",
+        (version_id, entry_id, row[0], meta, row[2], max_ver + 1, change_type, changed_by),
     )
 
 
