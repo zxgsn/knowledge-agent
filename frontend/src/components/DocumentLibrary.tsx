@@ -295,7 +295,7 @@ export function DocumentLibrary() {
   const HIDDEN_NAMESPACES = [
     "locomo_baseline", "locomo_context", "locomo_extracted",
     "locomo_bench_baseline", "locomo_bench_context",
-    "ingested", "conversation_facts", "session_context", "test",
+    "ingested", "conversation_facts", "test",
   ];
   const EXCLUDE_NS_PARAM = HIDDEN_NAMESPACES.join(",");
 

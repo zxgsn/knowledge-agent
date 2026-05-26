@@ -17,6 +17,7 @@ from agent.configuration import Configuration
 from agent.db import (
     cleanup_excess,
     cleanup_namespace,
+    cleanup_recall,
     delete_archival,
     get_all_facts,
     get_existing_memories,
@@ -26,9 +27,6 @@ from agent.db import (
     update_archival,
 )
 
-# How often (in turns) to store a session context window
-_CONTEXT_WINDOW_INTERVAL = 3
-_CONTEXT_WINDOW_SIZE = 10  # max messages in a window
 from agent.prompts import (
     CONSOLIDATION_MERGE_PROMPT,
     FACT_CONFLICT_PROMPT,
@@ -193,22 +191,6 @@ async def memory_pipeline(state: AgentState, config: RunnableConfig) -> dict:
         }],
     }
 
-    # Step 6: Store session context window periodically
-    if turn_count % _CONTEXT_WINDOW_INTERVAL == 0:
-        ctx = _build_context_window(messages)
-        if ctx:
-            await asyncio.to_thread(
-                put_to_archival,
-                ctx,
-                "session_context",
-                {"source": "session_window", "turn": turn_count, "msg_count": min(len(messages), _CONTEXT_WINDOW_SIZE)},
-            )
-            result["memory_operations"].append({
-                "type": "session_context_window",
-                "turn_count": turn_count,
-                "timestamp": datetime.now(timezone.utc).isoformat(),
-            })
-
     return result
 
 
@@ -293,18 +275,6 @@ async def _resolve_conflicts(
         resolved.append(op)
 
     return resolved
-
-
-def _build_context_window(messages: list) -> str:
-    """Build a multi-turn context window from recent messages."""
-    recent = messages[-_CONTEXT_WINDOW_SIZE:]
-    lines = []
-    for msg in recent:
-        if isinstance(msg, HumanMessage) and msg.content:
-            lines.append(f"User: {msg.content[:500]}")
-        elif isinstance(msg, AIMessage) and msg.content:
-            lines.append(f"Assistant: {msg.content[:500]}")
-    return "\n".join(lines) if len(lines) >= 2 else ""
 
 
 async def _consolidate_namespace(
@@ -418,22 +388,10 @@ async def consolidate_memory(state: AgentState, config: RunnableConfig) -> dict:
     )
     ops.append({"type": "consolidate", **result, "timestamp": t0.isoformat()})
 
-    # 3. session_context: cleanup old + excess
+    # 3. ingested: cleanup old + excess (no merge — preserve original chunks)
     cleanup_days = configurable.archival_cleanup_days
     max_entries = configurable.archival_max_entries
 
-    cleaned = await asyncio.to_thread(cleanup_namespace, "session_context", cleanup_days)
-    excess = await asyncio.to_thread(cleanup_excess, "session_context", max_entries)
-    if cleaned or excess:
-        ops.append({
-            "type": "cleanup",
-            "namespace": "session_context",
-            "expired_deleted": cleaned,
-            "excess_deleted": excess,
-            "timestamp": t0.isoformat(),
-        })
-
-    # 4. ingested: cleanup old + excess (no merge — preserve original chunks)
     cleaned = await asyncio.to_thread(cleanup_namespace, "ingested", cleanup_days)
     excess = await asyncio.to_thread(cleanup_excess, "ingested", max_entries)
     if cleaned or excess:
@@ -442,6 +400,21 @@ async def consolidate_memory(state: AgentState, config: RunnableConfig) -> dict:
             "namespace": "ingested",
             "expired_deleted": cleaned,
             "excess_deleted": excess,
+            "timestamp": t0.isoformat(),
+        })
+
+    # 4. recall memory: cleanup old + excess per thread
+    thread_id = state.get("thread_id", "default")
+    recall_cleaned, recall_excess = await asyncio.to_thread(
+        cleanup_recall, thread_id, cleanup_days, 500,
+    )
+    if recall_cleaned or recall_excess:
+        ops.append({
+            "type": "cleanup",
+            "namespace": "recall_memory",
+            "expired_deleted": recall_cleaned,
+            "excess_deleted": recall_excess,
+            "thread_id": thread_id,
             "timestamp": t0.isoformat(),
         })
 

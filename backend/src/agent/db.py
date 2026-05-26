@@ -550,7 +550,6 @@ SOURCE_TRUST = {
     "conversation": 0.7,
     "memory_pipeline": 0.7,
     "consolidation": 0.8,
-    "session_window": 0.5,
     "ingested": 0.8,
     "conflict_review": 0.9,
 }
@@ -861,3 +860,50 @@ def get_recent_recall(limit: int = 5, thread_id: str | None = None) -> list[dict
             "score": 1.0,
         })
     return results
+
+
+def cleanup_recall(
+    thread_id: str, max_age_days: int = 90, max_entries: int = 500
+) -> tuple[int, int]:
+    """Remove old recall entries and enforce a per-thread entry cap.
+
+    Returns:
+        (expired_deleted, excess_deleted) counts.
+    """
+    from agent.storage import ensure_recall_table
+
+    try:
+        ensure_recall_table()
+        with get_conn() as conn:
+            # TTL cleanup
+            expired_result = conn.execute(
+                "DELETE FROM recall_memory WHERE thread_id = %s "
+                "AND created_at < NOW() - INTERVAL '%s days'",
+                (thread_id, max_age_days),
+            )
+            expired_count = expired_result.rowcount
+
+            # Excess cleanup: keep only the most recent N
+            count = conn.execute(
+                "SELECT COUNT(*) FROM recall_memory WHERE thread_id = %s",
+                (thread_id,),
+            ).fetchone()[0]
+
+            excess_count = 0
+            if count > max_entries:
+                excess_ids = conn.execute(
+                    "SELECT id FROM recall_memory WHERE thread_id = %s "
+                    "ORDER BY created_at ASC LIMIT %s",
+                    (thread_id, count - max_entries),
+                ).fetchall()
+                if excess_ids:
+                    conn.execute(
+                        "DELETE FROM recall_memory WHERE id = ANY(%s)",
+                        ([r[0] for r in excess_ids],),
+                    )
+                    excess_count = len(excess_ids)
+
+            conn.commit()
+            return expired_count, excess_count
+    except Exception:
+        return 0, 0
