@@ -23,6 +23,7 @@ export default function App() {
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [currentThreadId, setCurrentThreadId] = useState<string | null>(null);
   const [coreMemoryRefreshKey, setCoreMemoryRefreshKey] = useState(0);
+  const submitLockRef = useRef(false);
   const thread = useStream<{
     messages: Message[];
     core_memory: Record<string, string>;
@@ -231,15 +232,48 @@ export default function App() {
     }
   }, [thread.messages, thread.isLoading, processedEventsTimeline]);
 
+  // Clear the submission lock when loading finishes (handles the race where
+  // the first stream's finally block fires after the second stream starts).
+  useEffect(() => {
+    if (!thread.isLoading) {
+      submitLockRef.current = false;
+    }
+  }, [thread.isLoading]);
+
   const handleSubmit = useCallback(
     (submittedInputValue: string, mode: string) => {
       if (!submittedInputValue.trim()) return;
+      if (submitLockRef.current) return;
 
       // Cancel any in-progress run before submitting a new one
       if (thread.isLoading) {
         thread.stop();
+        // Wait one tick for the aborted stream's finally block to execute
+        // before starting a new stream, preventing the stale finally from
+        // corrupting the new stream's shared state.
+        setTimeout(() => {
+          submitLockRef.current = true;
+          setProcessedEventsTimeline([]);
+          setError(null);
+          hasFinalizeEventOccurredRef.current = false;
+
+          const newMessages: Message[] = [
+            ...(thread.messages || []),
+            {
+              type: "human",
+              content: submittedInputValue,
+              id: Date.now().toString(),
+            },
+          ];
+          thread.submit({
+            messages: newMessages,
+            mode: mode,
+          });
+        }, 0);
+        return;
       }
 
+      submitLockRef.current = true;
       setProcessedEventsTimeline([]);
       setError(null);
       hasFinalizeEventOccurredRef.current = false;
