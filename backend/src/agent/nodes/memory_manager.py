@@ -314,16 +314,14 @@ async def save_to_archival(state: AgentState, config: RunnableConfig) -> dict:
             {"source": "research_summary", "topic": research_topic},
         )
     except Exception as e:
-        return {
-            "archival_results": [{
-                "content": response.content,
-                "source": "research_summary",
-                "topic": research_topic,
-                "error": str(e),
-            }]
-        }
+        import sys
+        print(f"[save_to_archival] Failed: {e}", file=sys.stderr)
+        return {}
 
-    # Log memory operation
+    # Log memory operation — do NOT return archival_results here,
+    # as that would overwrite the original memory search results
+    # from recall_memory. The research content is already available
+    # via web_research_result in state.
     memory_ops = [{
         "type": "save",
         "content_preview": response.content[:100] + "..." if len(response.content) > 100 else response.content,
@@ -333,15 +331,7 @@ async def save_to_archival(state: AgentState, config: RunnableConfig) -> dict:
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }]
 
-    return {
-        "archival_results": [{
-            "id": entry_id,
-            "content": response.content,
-            "source": "research_summary",
-            "topic": research_topic,
-        }],
-        "memory_operations": memory_ops,
-    }
+    return {"memory_operations": memory_ops}
 
 
 def _get_research_topic(messages: list) -> str:

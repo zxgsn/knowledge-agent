@@ -78,12 +78,14 @@ async def respond(state: AgentState, config: RunnableConfig) -> dict:
                 messages_for_llm.append({"role": "user", "content": content})
             elif isinstance(msg, AIMessage) and msg.content:
                 messages_for_llm.append({"role": "assistant", "content": msg.content})
-        if archival_context or recall_context:
-            context_parts = []
-            if archival_context:
-                context_parts.append(f"[Archival Memory]\n{archival_context}")
-            if recall_context:
-                context_parts.append(f"[Conversation History]\n{recall_context}")
+        context_parts = []
+        if archival_context:
+            context_parts.append(f"[Archival Memory]\n{archival_context}")
+        if recall_context:
+            context_parts.append(f"[Conversation History]\n{recall_context}")
+        if summaries:
+            context_parts.append(f"[Web Research]\n{summaries}")
+        if context_parts:
             messages_for_llm.append({
                 "role": "user",
                 "content": "\n\n".join(context_parts),
