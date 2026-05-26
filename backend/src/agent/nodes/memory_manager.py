@@ -112,13 +112,7 @@ async def recall_memory(state: AgentState, config: RunnableConfig) -> dict:
     if not user_msg:
         return {"archival_results": [], "recall_results": []}
 
-    # Save user message to recall memory (thread-isolated)
     thread_id = state.get("thread_id", "default")
-    try:
-        await asyncio.to_thread(save_to_recall, "user", user_msg, thread_id=thread_id)
-    except Exception as e:
-        import sys
-        print(f"[memory_manager] Failed to save to recall: {e}", file=sys.stderr)
 
     # Proactive memory: push recent memories at conversation start
     mode = state.get("mode", "chat")
@@ -178,6 +172,13 @@ async def recall_memory(state: AgentState, config: RunnableConfig) -> dict:
     archival_results_raw, recall_results_raw = await asyncio.gather(
         archival_task, recall_task
     )
+
+    # Save user message to recall AFTER searching to avoid matching itself
+    try:
+        await asyncio.to_thread(save_to_recall, "user", user_msg, thread_id=thread_id)
+    except Exception as e:
+        import sys
+        print(f"[memory_manager] Failed to save to recall: {e}", file=sys.stderr)
 
     # Log memory operation
     memory_ops = [{
