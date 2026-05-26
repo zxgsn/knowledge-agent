@@ -16,6 +16,12 @@ from __future__ import annotations
 
 import os
 
+# Pre-import transformers in sync context to avoid blockbuster blocking error.
+# langchain_core lazily imports transformers, which calls os.getcwd() during
+# module init. Importing it here (during graph compilation, before the async
+# event loop) caches the module so subsequent lazy imports are no-ops.
+import transformers  # noqa: F401
+
 from dotenv import load_dotenv
 from langchain_core.messages import HumanMessage
 from langchain_core.runnables import RunnableConfig
