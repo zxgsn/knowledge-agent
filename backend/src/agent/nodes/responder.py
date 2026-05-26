@@ -120,6 +120,16 @@ async def respond(state: AgentState, config: RunnableConfig) -> dict:
 
         response = await llm_with_tools.ainvoke(messages_for_llm)
 
+    # If the LLM returned only tool calls with no text content, force one more
+    # call without tools to produce an actual user-facing response.
+    if not response.content and response.tool_calls:
+        messages_for_llm.append(response)
+        messages_for_llm.append({
+            "role": "user",
+            "content": "Please provide your response to the user now.",
+        })
+        response = await llm.ainvoke(messages_for_llm)
+
     # Auto-compress blocks that are approaching their character limit
     needs_compression = core_memory.get_blocks_needing_compression()
     if needs_compression:
@@ -129,13 +139,14 @@ async def respond(state: AgentState, config: RunnableConfig) -> dict:
 
     # Save AI response to recall memory (thread-isolated)
     thread_id = state.get("thread_id", "default")
-    try:
-        await asyncio.to_thread(save_to_recall, "assistant", response.content, thread_id=thread_id)
-    except Exception as e:
-        print(f"[responder] Failed to save to recall: {e}", file=sys.stderr)
+    if response.content:
+        try:
+            await asyncio.to_thread(save_to_recall, "assistant", response.content, thread_id=thread_id)
+        except Exception as e:
+            print(f"[responder] Failed to save to recall: {e}", file=sys.stderr)
 
     # Add memory indicator when archival/recall results were used
-    response_text = response.content
+    response_text = response.content or ""
     archival_used = [r for r in state.get("archival_results", []) if r.get("score", 0) >= 0.3]
     recall_used = [r for r in state.get("recall_results", []) if r.get("score", 0) >= 0.3]
     if archival_used or recall_used:
