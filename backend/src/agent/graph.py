@@ -15,6 +15,10 @@ Flow:
 from __future__ import annotations
 
 import os
+import warnings
+
+# Suppress langgraph deprecation warning about allowed_objects default
+warnings.filterwarnings("ignore", category=DeprecationWarning, module="langgraph.cache.base")
 
 # Pre-import transformers in sync context to avoid blockbuster blocking error.
 # langchain_core lazily imports transformers, which calls os.getcwd() during
