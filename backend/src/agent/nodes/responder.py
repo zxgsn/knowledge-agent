@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import asyncio
+import re
 import sys
 
+from langchain_core.callbacks import dispatch_custom_event
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langchain_core.runnables import RunnableConfig
 
@@ -31,13 +33,16 @@ async def respond(state: AgentState, config: RunnableConfig) -> dict:
 
     core_memory = CoreMemory.from_dict(state.get("core_memory", {}))
     summaries = "\n\n---\n\n".join(state.get("web_research_result", []))
-    archival_context = _format_archival_results(state.get("archival_results", []))
-    recall_context = _format_recall_results(state.get("recall_results", []))
 
     system = SYSTEM_PROMPT.format(
         current_date=get_current_date(),
         memory_blocks=core_memory.compile(),
     )
+
+    archival_results = state.get("archival_results", [])
+    recall_results = state.get("recall_results", [])
+    archival_context = _format_archival_results(archival_results)
+    recall_context = _format_recall_results(recall_results)
 
     if state.get("mode") == "research" and summaries:
         research_topic = ""
@@ -60,18 +65,17 @@ async def respond(state: AgentState, config: RunnableConfig) -> dict:
             if isinstance(msg, HumanMessage):
                 content = msg.content
                 # Strip PDF base64 data — replace tag with short summary
-                import re as _re
-                pdf_match = _re.search(
+                pdf_match = re.search(
                     r"\[UPLOAD_PDF:(.+?)\]",
                     content,
                 )
                 if pdf_match:
                     doc_name = pdf_match.group(1)
-                    remaining = _re.sub(
+                    remaining = re.sub(
                         r"\[UPLOAD_PDF:.+?\].+?\[/UPLOAD_PDF\]",
                         "",
                         content,
-                        flags=_re.DOTALL,
+                        flags=re.DOTALL,
                     ).strip()
                     suffix = f"[Uploaded PDF: {doc_name}. Document has been ingested into archival memory.]"
                     content = f"{remaining}\n\n{suffix}" if remaining else suffix
@@ -80,9 +84,21 @@ async def respond(state: AgentState, config: RunnableConfig) -> dict:
                 messages_for_llm.append({"role": "assistant", "content": msg.content})
         context_parts = []
         if archival_context:
-            context_parts.append(f"[Archival Memory]\n{archival_context}")
+            context_parts.append(
+                "[Archival Memory]\n"
+                "Each entry has an ID in brackets like [a0], [a1], etc. "
+                "IMPORTANT: When you use information from an entry, you MUST cite it "
+                "inline as [ref:a0], [ref:a1], etc. This is required for tracking.\n"
+                f"{archival_context}"
+            )
         if recall_context:
-            context_parts.append(f"[Conversation History]\n{recall_context}")
+            context_parts.append(
+                "[Conversation History]\n"
+                "Each entry has an ID in brackets like [r0], [r1], etc. "
+                "IMPORTANT: When you use information from an entry, you MUST cite it "
+                "inline as [ref:r0], [ref:r1], etc. This is required for tracking.\n"
+                f"{recall_context}"
+            )
         if summaries:
             context_parts.append(f"[Web Research]\n{summaries}")
         if context_parts:
@@ -97,6 +113,7 @@ async def respond(state: AgentState, config: RunnableConfig) -> dict:
     tools_by_name = {t.name: t for t in tools}
 
     # Tool-calling loop: LLM may call tools multiple times before final answer
+    dispatch_custom_event("progress", {"stage": "respond", "detail": "Generating response..."}, config=config)
     response = await llm_with_tools.ainvoke(messages_for_llm)
 
     for _ in range(MAX_TOOL_ROUNDS):
@@ -147,19 +164,24 @@ async def respond(state: AgentState, config: RunnableConfig) -> dict:
         except Exception as e:
             print(f"[responder] Failed to save to recall: {e}", file=sys.stderr)
 
-    # Add memory indicator when archival/recall results were used
+    # Add memory indicator when archival/recall results were retrieved
     response_text = response.content or ""
-    archival_used = [r for r in state.get("archival_results", []) if r.get("score", 0) >= 0.3]
-    recall_used = [r for r in state.get("recall_results", []) if r.get("score", 0) >= 0.3]
-    if archival_used or recall_used:
-        total = len(archival_used) + len(recall_used)
+    if archival_results or recall_results:
+        # Detect which memories were cited via [ref:ID] tags in the response
+        cited_ids = set(re.findall(r"\[ref:([ar]\d+)\]", response_text))
+        # Strip [ref:ID] tags from the displayed response
+        response_text = re.sub(r"\s*\[ref:[ar]\d+\]", "", response_text)
+
+        total = len(archival_results) + len(recall_results)
         indicator = f"\n\n---\n> 📚 **从记忆中检索到 {total} 条相关内容**"
-        for r in archival_used[:2]:
+        for i, r in enumerate(archival_results):
             preview = r["content"][:60] + ("..." if len(r["content"]) > 60 else "")
-            indicator += f"\n> - [archival:{r.get('source', '?')}] {preview} (score: {r['score']:.2f})"
-        for r in recall_used[:2]:
+            tag = "✓" if f"a{i}" in cited_ids else ""
+            indicator += f"\n> - [archival:{r.get('source', '?')}] {preview} (score: {r['score']:.2f}) {tag}"
+        for i, r in enumerate(recall_results):
             preview = r["content"][:60] + ("..." if len(r["content"]) > 60 else "")
-            indicator += f"\n> - [recall:{r.get('role', '?')}] {preview} (score: {r['score']:.2f})"
+            tag = "✓" if f"r{i}" in cited_ids else ""
+            indicator += f"\n> - [recall:{r.get('role', '?')}] {preview} (score: {r['score']:.2f}) {tag}"
         response_text += indicator
 
     result = {
@@ -173,21 +195,19 @@ def _format_archival_results(results: list) -> str:
     if not results:
         return ""
     parts = []
-    for r in results:
+    for i, r in enumerate(results):
         score = r.get("score", 0)
-        if score >= 0.3:
-            parts.append(f"- {r['content']} (relevance: {score:.2f})")
-    return "\n\n".join(parts) if parts else ""
+        parts.append(f"[a{i}] {r['content']} (relevance: {score:.2f})")
+    return "\n\n".join(parts)
 
 
 def _format_recall_results(results: list) -> str:
     if not results:
         return ""
     parts = []
-    for r in results:
+    for i, r in enumerate(results):
         score = r.get("score", 0)
-        if score >= 0.3:
-            role = r.get("role", "unknown")
-            content = r["content"][:300] + ("..." if len(r["content"]) > 300 else "")
-            parts.append(f"- [{role}] {content} (relevance: {score:.2f})")
-    return "\n\n".join(parts) if parts else ""
+        role = r.get("role", "unknown")
+        content = r["content"][:300] + ("..." if len(r["content"]) > 300 else "")
+        parts.append(f"[r{i}] [{role}] {content} (relevance: {score:.2f})")
+    return "\n\n".join(parts)

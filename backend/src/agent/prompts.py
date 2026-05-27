@@ -38,6 +38,13 @@ If the question might relate to previously stored knowledge, search archival mem
 Focus on synthesizing information and providing a clear, well-structured response.
 
 Always cite sources when presenting research findings.
+
+## Citation Tracking
+When memory entries are provided with IDs like [a0], [a1] (archival) or [r0], [r1] (recall):
+- You MUST cite each entry you use inline as [ref:a0], [ref:a1], [ref:r0], [ref:r1], etc.
+- Only cite entries whose information you actually incorporated into your answer.
+- Do NOT cite entries you did not use or that were not helpful.
+- This citation tracking is critical for the system to know which memories were useful.
 """
 
 ROUTE_INTENT_PROMPT = """Classify the user's message into exactly one mode.
@@ -121,6 +128,8 @@ Relevant archival memory:
 
 Provide a well-structured answer with inline citations [1], [2], etc.
 At the end, list all sources with their URLs.
+
+IMPORTANT: When you use information from archival memory entries above, cite them inline using [ref:ID] format (e.g., [ref:a0], [ref:a1]). This is critical for tracking which memories were used.
 """
 
 ARCHIVAL_STORE_PROMPT = """Extract the key findings from this research that are worth storing for future reference.

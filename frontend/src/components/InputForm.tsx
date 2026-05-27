@@ -200,15 +200,15 @@ export const InputForm: React.FC<InputFormProps> = ({
           )}
         </div>
       </div>
-      <div className="flex items-center justify-between">
-        <div className="flex flex-row gap-2">
-          <div className="flex flex-row gap-2 bg-neutral-700 border-neutral-600 text-neutral-300 focus:ring-neutral-500 rounded-xl rounded-t-sm pl-2 max-w-[100%] sm:max-w-[90%]">
-            <div className="flex flex-row items-center text-sm">
+      <div className="flex items-center gap-2 overflow-x-auto">
+        <div className="flex items-center gap-2 min-w-0 flex-1">
+          <div className="flex items-center gap-2 bg-neutral-700 border-neutral-600 text-neutral-300 rounded-xl rounded-t-sm pl-2 shrink-0">
+            <div className="flex items-center text-sm whitespace-nowrap">
               <Brain className="h-4 w-4 mr-2" />
               Mode
             </div>
             <Select value={mode} onValueChange={setMode}>
-              <SelectTrigger className="w-[140px] bg-transparent border-none cursor-pointer">
+              <SelectTrigger className="w-[130px] bg-transparent border-none cursor-pointer">
                 <SelectValue placeholder="Mode" />
               </SelectTrigger>
               <SelectContent className="bg-neutral-700 border-neutral-600 text-neutral-300 cursor-pointer">
@@ -250,7 +250,7 @@ export const InputForm: React.FC<InputFormProps> = ({
           <Button
             type="button"
             variant="ghost"
-            className="bg-neutral-700 border-neutral-600 text-neutral-300 hover:text-neutral-100 hover:bg-neutral-600 cursor-pointer rounded-xl rounded-t-sm px-3"
+            className="bg-neutral-700 border-neutral-600 text-neutral-300 hover:text-neutral-100 hover:bg-neutral-600 cursor-pointer rounded-xl rounded-t-sm px-3 shrink-0"
             onClick={() => fileInputRef.current?.click()}
             title="Upload PDF"
           >
@@ -267,7 +267,7 @@ export const InputForm: React.FC<InputFormProps> = ({
         </div>
         {hasHistory && (
           <Button
-            className="bg-neutral-700 border-neutral-600 text-neutral-300 cursor-pointer rounded-xl rounded-t-sm pl-2"
+            className="bg-neutral-700 border-neutral-600 text-neutral-300 cursor-pointer rounded-xl rounded-t-sm pl-2 shrink-0"
             variant="default"
             onClick={() => window.location.reload()}
           >

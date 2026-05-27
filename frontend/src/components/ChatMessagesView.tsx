@@ -1,7 +1,7 @@
 import type React from "react";
 import type { Message } from "@langchain/langgraph-sdk";
 import { ScrollArea } from "@/components/ui/scroll-area";
-import { Loader2, Copy, CopyCheck, BookMarked, BookOpen } from "lucide-react";
+import { Loader2, Copy, CopyCheck, BookMarked, BookOpen, ChevronDown, ChevronUp } from "lucide-react";
 import { InputForm } from "@/components/InputForm";
 import { Button } from "@/components/ui/button";
 import { useState, ReactNode } from "react";
@@ -186,18 +186,100 @@ function extractMemorySection(content: string): { main: string; memory: string |
   };
 }
 
-// Memory indicator badge component
-const MemoryBadge: React.FC<{ memoryText: string }> = ({ memoryText }) => (
-  <div className="mt-3 rounded-lg border border-emerald-700/50 bg-emerald-950/30 px-3 py-2">
-    <div className="flex items-center gap-2 text-emerald-400 text-xs font-medium mb-1">
-      <BookMarked className="h-3.5 w-3.5" />
-      <span>Memory Retrieved</span>
+interface MemoryItem {
+  type: "archival" | "recall";
+  source: string;
+  preview: string;
+  score: number;
+  used: boolean;
+}
+
+function parseMemoryItems(text: string): { count: number; items: MemoryItem[] } {
+  const items: MemoryItem[] = [];
+  const lineRegex = /- \[(archival|recall):([^\]]*)\]\s*(.+?)\s*\(score:\s*([\d.]+)\)\s*(✓)?/g;
+  let m;
+  while ((m = lineRegex.exec(text)) !== null) {
+    items.push({
+      type: m[1] as "archival" | "recall",
+      source: m[2],
+      preview: m[3].trim(),
+      score: parseFloat(m[4]),
+      used: m[5] === "✓",
+    });
+  }
+  return { count: items.length, items };
+}
+
+const MemoryBadge: React.FC<{ memoryText: string }> = ({ memoryText }) => {
+  const { count, items: rawItems } = parseMemoryItems(memoryText);
+  const items = [...rawItems].sort((a, b) => b.score - a.score);
+  const [expanded, setExpanded] = useState(false);
+
+  return (
+    <div className="mt-3 rounded-lg border border-emerald-700/40 bg-emerald-950/20 overflow-hidden">
+      <button
+        type="button"
+        onClick={() => setExpanded(!expanded)}
+        className="w-full flex items-center gap-2 px-3 py-1.5 bg-emerald-950/40 hover:bg-emerald-950/60 transition-colors cursor-pointer"
+      >
+        <BookMarked className="h-3.5 w-3.5 text-emerald-400 shrink-0" />
+        <span className="text-emerald-400 text-xs font-medium">
+          {count > 0
+            ? `检索到 ${count} 条记忆`
+            : "Memory Retrieved"}
+        </span>
+        <span className="ml-auto text-emerald-600">
+          {expanded ? (
+            <ChevronUp className="h-3.5 w-3.5" />
+          ) : (
+            <ChevronDown className="h-3.5 w-3.5" />
+          )}
+        </span>
+      </button>
+      {expanded && items.length > 0 && (
+        <div className="border-t border-emerald-800/30 overflow-hidden">
+          {items.map((item, i) => (
+            <div
+              key={i}
+              className={cn(
+                "px-3 py-1.5 flex items-center gap-2 text-xs min-w-0",
+                i > 0 && "border-t border-emerald-900/20",
+              )}
+            >
+              <span className="shrink-0 w-5 text-right text-neutral-500 tabular-nums">
+                {i + 1}
+              </span>
+              <span
+                className={cn(
+                  "shrink-0 text-[10px] px-1 py-0.5 rounded",
+                  item.type === "archival"
+                    ? "bg-blue-500/15 text-blue-400"
+                    : "bg-amber-500/15 text-amber-400",
+                )}
+              >
+                {item.type}
+              </span>
+              <span className="flex-1 min-w-0 truncate text-neutral-300">
+                {item.preview}
+              </span>
+              <span className="shrink-0 text-neutral-500 tabular-nums">
+                {(item.score * 100).toFixed(0)}%
+              </span>
+              {item.used && (
+                <span className="shrink-0 text-emerald-400 text-sm font-bold">✓</span>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+      {expanded && items.length === 0 && (
+        <div className="px-3 py-1.5 text-xs text-emerald-300/60 border-t border-emerald-800/30">
+          {memoryText}
+        </div>
+      )}
     </div>
-    <div className="text-xs text-emerald-300/80 whitespace-pre-line leading-relaxed">
-      {memoryText}
-    </div>
-  </div>
-);
+  );
+};
 
 // Props for AiMessageBubble
 interface AiMessageBubbleProps {
@@ -231,9 +313,11 @@ const AiMessageBubble: React.FC<AiMessageBubbleProps> = ({
     ? message.content
     : JSON.stringify(message.content);
   const { main: mainContent, memory: memoryText } = extractMemorySection(rawContent);
+  const memoryItems = memoryText ? parseMemoryItems(memoryText) : null;
+  const hasMemoryResults = memoryItems && memoryItems.items.length > 0;
 
   return (
-    <div className={`relative break-words flex flex-col`}>
+    <div className={`relative break-words flex flex-col min-w-0`}>
       {activityForThisBubble && activityForThisBubble.length > 0 && (
         <div className="mb-3 border-b border-neutral-700 pb-3 text-xs">
           <ActivityTimeline
@@ -245,7 +329,7 @@ const AiMessageBubble: React.FC<AiMessageBubbleProps> = ({
       <ReactMarkdown components={mdComponents}>
         {mainContent}
       </ReactMarkdown>
-      {memoryText && <MemoryBadge memoryText={memoryText} />}
+      {hasMemoryResults && <MemoryBadge memoryText={memoryText!} />}
       <Button
         variant="default"
         className={`cursor-pointer bg-neutral-700 border-neutral-600 text-neutral-300 self-end ${
@@ -306,7 +390,7 @@ export function ChatMessagesView({
         <BookOpen className="w-4 h-4" />
         Library
       </Link>
-      <ScrollArea className="flex-1 overflow-y-auto" ref={scrollAreaRef}>
+      <ScrollArea className="flex-1 overflow-y-auto overflow-x-hidden" ref={scrollAreaRef}>
         <div className="p-4 md:p-6 space-y-2 max-w-4xl mx-auto pt-16">
           {messages.filter((message) => {
             // Skip AI messages with no content (intermediate tool-calling steps)
@@ -345,29 +429,18 @@ export function ChatMessagesView({
               </div>
             );
           })}
-          {isLoading &&
-            (messages.length === 0 ||
-              messages[messages.length - 1].type === "human") && (
-              <div className="flex items-start gap-3 mt-3">
-                {" "}
-                {/* AI message row structure */}
-                <div className="relative group max-w-[85%] md:max-w-[80%] rounded-xl p-3 shadow-sm break-words bg-neutral-800 text-neutral-100 rounded-bl-none w-full min-h-[56px]">
-                  {liveActivityEvents.length > 0 ? (
-                    <div className="text-xs">
-                      <ActivityTimeline
-                        processedEvents={liveActivityEvents}
-                        isLoading={true}
-                      />
-                    </div>
-                  ) : (
-                    <div className="flex items-center justify-start h-full">
-                      <Loader2 className="h-5 w-5 animate-spin text-neutral-400 mr-2" />
-                      <span>Processing...</span>
-                    </div>
-                  )}
+          {isLoading && (
+            <div className="flex items-start gap-3 mt-3">
+              <div className="relative group max-w-[85%] md:max-w-[80%] rounded-xl p-3 shadow-sm break-words bg-neutral-800 text-neutral-100 rounded-bl-none w-full min-h-[56px]">
+                <div className="text-xs">
+                  <ActivityTimeline
+                    processedEvents={liveActivityEvents}
+                    isLoading={true}
+                  />
                 </div>
               </div>
-            )}
+            </div>
+          )}
         </div>
       </ScrollArea>
       <InputForm

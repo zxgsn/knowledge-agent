@@ -72,7 +72,7 @@ export function ActivityTimeline({
   }, [isLoading, processedEvents]);
 
   return (
-    <Card className="border-none rounded-lg bg-neutral-700 max-h-96">
+    <Card className="border-none rounded-lg bg-neutral-700 max-h-96 overflow-hidden">
       <CardHeader>
         <CardDescription className="flex items-center justify-between">
           <div
@@ -91,7 +91,7 @@ export function ActivityTimeline({
         </CardDescription>
       </CardHeader>
       {!isTimelineCollapsed && (
-        <ScrollArea className="max-h-96 overflow-y-auto">
+        <ScrollArea className="max-h-96 overflow-y-auto overflow-x-hidden">
           <CardContent>
             {isLoading && processedEvents.length === 0 && (
               <div className="relative pl-8 pb-4">
@@ -125,17 +125,17 @@ export function ActivityTimeline({
                       eventItem.data.length > 0 &&
                       typeof eventItem.data[0] === "object" &&
                       "type" in eventItem.data[0] ? (
-                        <div className="space-y-1.5 mt-1">
-                          {eventItem.data.map(
+                        <div className="space-y-1.5 mt-1 overflow-hidden">
+                          {[...eventItem.data]
+                            .sort((a: any, b: any) => (b.score || 0) - (a.score || 0))
+                            .map(
                             (item: any, i: number) => (
                               <div
                                 key={i}
-                                className="rounded-md bg-neutral-800/70 px-2.5 py-1.5 text-xs"
+                                className="rounded-md bg-neutral-800/70 px-2.5 py-1.5 text-xs overflow-hidden"
                               >
-                                <p className="text-neutral-200 leading-relaxed mb-1">
-                                  {item.content?.length > 160
-                                    ? item.content.slice(0, 160) + "…"
-                                    : item.content}
+                                <p className="text-neutral-200 leading-relaxed mb-1 break-words line-clamp-3">
+                                  {item.content || ""}
                                 </p>
                                 <div className="flex flex-wrap gap-1.5">
                                   {item.type && (
@@ -178,6 +178,9 @@ export function ActivityTimeline({
                                     <span className="inline-flex items-center rounded bg-neutral-700 px-1.5 py-0.5 text-[10px] text-neutral-400">
                                       {(item.score * 100).toFixed(0)}%
                                     </span>
+                                  )}
+                                  {item.used && (
+                                    <span className="inline-flex items-center text-emerald-400 text-sm font-bold">✓</span>
                                   )}
                                 </div>
                               </div>

@@ -51,6 +51,7 @@ export function ThreadSidebar({
   const [deletingId, setDeletingId] = useState<string | null>(null);
   const [width, setWidth] = useState(256);
   const isResizing = useRef(false);
+  const hasLoaded = useRef(false);
 
   const handleDelete = useCallback(async (threadId: string, e: React.MouseEvent) => {
     e.stopPropagation();
@@ -82,36 +83,37 @@ export function ThreadSidebar({
         sortOrder: "desc",
       });
 
-      // Pre-filter: need messages in values AND at least one AI message
-      const candidates = threadList.filter((t: any) => {
+      // Filter candidates with valid messages
+      const candidates: { thread: Thread; threadId: string }[] = [];
+      for (const t of threadList as any[]) {
         const msgs = t.values?.messages;
-        if (!Array.isArray(msgs) || msgs.length === 0) return false;
-        return msgs.some((m: any) => m.type === "ai");
-      });
-
-      // Check history for each candidate — useStream loads via getHistory, not values
-      const validThreads: Thread[] = [];
-      await Promise.all(
-        candidates.map(async (t: any) => {
-          try {
-            const hist = await client.threads.getHistory(t.thread_id, { limit: 1 });
-            if (hist.length === 0) return; // no checkpoint — useStream will show nothing
-          } catch {
-            return; // history fetch failed — skip
-          }
-          const msgs = t.values.messages;
-          const firstHuman = msgs.find((m: any) => m.type === "human");
-          validThreads.push({
+        if (!Array.isArray(msgs) || msgs.length === 0) continue;
+        if (!msgs.some((m: any) => m.type === "ai")) continue;
+        const firstHuman = msgs.find((m: any) => m.type === "human");
+        candidates.push({
+          thread: {
             thread_id: t.thread_id,
             created_at: t.created_at || t.metadata?.created_at || "",
             first_message: firstHuman?.content || "",
-          });
-        })
-      );
+          },
+          threadId: t.thread_id,
+        });
+      }
 
-      // Sort by created_at descending (Promise.all may reorder)
+      // Verify checkpoints exist (concurrent)
+      const checks = candidates.map(async ({ thread, threadId }) => {
+        try {
+          const hist = await client.threads.getHistory(threadId, { limit: 1 });
+          return hist.length > 0 ? thread : null;
+        } catch {
+          return null;
+        }
+      });
+      const validThreads = (await Promise.all(checks)).filter(Boolean) as Thread[];
       validThreads.sort((a, b) => (b.created_at > a.created_at ? 1 : -1));
+
       setThreads(validThreads);
+      hasLoaded.current = true;
     } catch (err) {
       console.error("Failed to fetch threads:", err);
     }
@@ -119,8 +121,16 @@ export function ThreadSidebar({
   }, []);
 
   useEffect(() => {
-    if (isOpen) fetchThreads();
+    if (isOpen && !hasLoaded.current) fetchThreads();
   }, [isOpen, fetchThreads]);
+
+  // Refresh list when a new thread is created (currentThreadId becomes non-null and not in list)
+  useEffect(() => {
+    if (currentThreadId && !threads.find((t) => t.thread_id === currentThreadId)) {
+      hasLoaded.current = false;
+      if (isOpen) fetchThreads();
+    }
+  }, [currentThreadId, threads, isOpen, fetchThreads]);
 
   // Resize handlers
   const handleMouseDown = useCallback((e: React.MouseEvent) => {

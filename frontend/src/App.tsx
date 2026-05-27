@@ -35,14 +35,57 @@ export default function App() {
     assistantId: "agent",
     messagesKey: "messages",
     threadId: currentThreadId ?? undefined,
+    onCustomEvent: (event: any) => {
+      const payload = event?.name ? event : event?.data ? event.data : event;
+      if (payload?.name === "progress") {
+        const { stage, detail } = payload.data || {};
+        const titleMap: Record<string, string> = {
+          memory_search: "Searching Memory",
+          evaluate_recall: "Evaluating Recall",
+          generate_query: "Generating Queries",
+          web_research: "Web Research",
+          reflection: "Reflection",
+          save_to_archival: "Saving to Memory",
+          ingest_document: "Ingesting Document",
+          memory_pipeline: "Memory Pipeline",
+          consolidate_memory: "Consolidating Memory",
+          respond: "Generating Response",
+        };
+        const title = titleMap[stage] || stage || "Processing";
+        setProcessedEventsTimeline((prev) => {
+          // Remove placeholder and add real progress event
+          const filtered = prev.filter((e) => e.data !== "__pending__");
+          const last = filtered[filtered.length - 1];
+          if (last && last.title === title && last.data === detail) return filtered;
+          return [...filtered, { title, data: detail || "" }];
+        });
+      }
+    },
     onUpdateEvent: (event: any) => {
+      // Remove any pending placeholders when real events arrive
+      const removePending = () => {
+        setProcessedEventsTimeline((prev) =>
+          prev.filter((e) => e.data !== "__pending__")
+        );
+      };
+
       let processedEvent: ProcessedEvent | null = null;
       if (event.route_intent) {
         processedEvent = {
           title: "Understanding Intent",
           data: `Mode: ${event.route_intent?.mode || "chat"}`,
         };
-      } else if (event.generate_query) {
+        // Add placeholder for next step
+        setProcessedEventsTimeline((prev) => [
+          ...prev,
+          processedEvent!,
+          { title: "Searching Memory", data: "__pending__" },
+        ]);
+        return;
+      } else if (event.recall_memory || event.evaluate_recall || event.generate_query) {
+        removePending();
+      }
+      if (event.generate_query) {
         processedEvent = {
           title: "Generating Search Queries",
           data: event.generate_query?.search_query?.join(", ") || "",
@@ -99,9 +142,19 @@ export default function App() {
           title: isSufficient ? "Memory Sufficient" : "Memory Insufficient — Searching Web",
           data: reason,
         };
+        // Add placeholder for next step
+        if (!isSufficient) {
+          setProcessedEventsTimeline((prev) => [
+            ...prev,
+            processedEvent!,
+            { title: "Generating Queries", data: "__pending__" },
+          ]);
+          return;
+        }
       } else if (event.memory_pipeline) {
         const memOps = event.memory_pipeline?.memory_operations;
         const extractOp = Array.isArray(memOps) ? memOps.find((op: any) => op.type === "pipeline_extract") : null;
+        const judgmentOp = Array.isArray(memOps) ? memOps.find((op: any) => op.type === "pipeline_judgment") : null;
         if (extractOp) {
           const extracted = extractOp.facts_count ?? 0;
           const stored = extractOp.stored ?? 0;
@@ -119,7 +172,23 @@ export default function App() {
               title: "Memory Pipeline",
               data: `${extracted} operations (${existing} existing): ${parts.join(", ")}`,
             };
+          } else {
+            processedEvent = {
+              title: "Memory Pipeline",
+              data: "No new facts extracted.",
+            };
           }
+        } else if (judgmentOp) {
+          const memorable = judgmentOp.memorable ?? false;
+          processedEvent = {
+            title: "Memory Judgment",
+            data: memorable ? "Content marked as memorable." : "Not memorable — skipping.",
+          };
+        } else {
+          processedEvent = {
+            title: "Memory Pipeline",
+            data: "Checked — no new memories.",
+          };
         }
       } else if (event.save_to_archival) {
         const memOps = event.save_to_archival?.memory_operations;
@@ -132,6 +201,7 @@ export default function App() {
         };
       } else if (event.consolidate_memory) {
         const memOps = event.consolidate_memory?.memory_operations;
+        const parts: string[] = [];
         if (Array.isArray(memOps)) {
           for (const op of memOps) {
             if (op.type === "consolidate") {
@@ -139,23 +209,28 @@ export default function App() {
               const merged = op.merged ?? 0;
               const deleted = op.deleted ?? 0;
               if (merged > 0 || deleted > 0) {
-                processedEvent = {
-                  title: "Memory Consolidated",
-                  data: `[${ns}] ${merged} groups merged, ${deleted} duplicates removed`,
-                };
+                parts.push(`[${ns}] ${merged} merged, ${deleted} removed`);
               }
             } else if (op.type === "cleanup") {
               const ns = op.namespace || "?";
               const expired = op.expired_deleted ?? 0;
               const excess = op.excess_deleted ?? 0;
               if (expired > 0 || excess > 0) {
-                processedEvent = {
-                  title: "Memory Cleanup",
-                  data: `[${ns}] ${expired} expired, ${excess} excess entries removed`,
-                };
+                parts.push(`[${ns}] ${expired} expired, ${excess} excess`);
               }
             }
           }
+        }
+        if (parts.length > 0) {
+          processedEvent = {
+            title: "Memory Consolidation",
+            data: parts.join("; "),
+          };
+        } else {
+          processedEvent = {
+            title: "Memory Consolidation",
+            data: "Checked — memory is clean.",
+          };
         }
       } else if (event.ingest_document) {
         const ingestResult = event.ingest_document?.ingest_result;
