@@ -20,7 +20,11 @@ import re
 import sys
 import time
 import uuid
+import warnings
 from datetime import datetime, timezone
+
+# Suppress langgraph deprecation warning
+warnings.filterwarnings("ignore", category=DeprecationWarning, module="langgraph")
 
 if sys.platform == "win32":
     asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
@@ -268,14 +272,23 @@ def ingest_session_context(
     Each window contains `window_size` consecutive turns with `stride` step,
     giving the embedding more context than a single turn.
     Larger windows (10) capture more context for better retrieval.
+
+    Adds temporal context: session ordering (Day 1, Day 2...) and turn indices
+    to help with temporal questions.
     """
     embeddings = get_embeddings()
 
     windows = []
     for sample in samples:
         sid = sample["sample_id"]
-        for session in sample["conversation"]:
+        total_sessions = len(sample["conversation"])
+
+        for session_idx, session in enumerate(sample["conversation"]):
             session_id = session["session_id"]
+            # Add temporal context: session ordering
+            day_label = f"Day {session_idx + 1}"
+            temporal_prefix = f"[{day_label}, Session {session_id}/{total_sessions}]"
+
             turns = [t for t in session["dialogue"] if isinstance(t, dict)]
             for start in range(0, len(turns), stride):
                 chunk = turns[start : start + window_size]
@@ -290,15 +303,21 @@ def ingest_session_context(
                         lines.append(f"[Turn {start+i}] {speaker}: {utterance}")
                 if not lines:
                     continue
-                content = f"[Session {session_id}] " + "\n".join(lines)
+
+                # Build content with temporal context
+                content = f"{temporal_prefix} " + "\n".join(lines)
+
                 windows.append({
                     "content": content,
                     "metadata": {
                         "sample_id": sid,
                         "session_id": session_id,
+                        "session_index": session_idx,
+                        "day_label": day_label,
                         "start_turn": start,
                         "end_turn": start + len(chunk),
                         "window_size": len(chunk),
+                        "temporal_order": session_idx + 1,
                         "source": "locomo_context",
                     },
                 })

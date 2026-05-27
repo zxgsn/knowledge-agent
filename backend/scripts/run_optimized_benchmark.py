@@ -30,8 +30,12 @@ import json
 import os
 import sys
 import time
+import warnings
 from datetime import datetime, timezone
 from functools import partial
+
+# Suppress langgraph deprecation warning
+warnings.filterwarnings("ignore", category=DeprecationWarning, module="langgraph")
 
 if sys.platform == "win32":
     asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
