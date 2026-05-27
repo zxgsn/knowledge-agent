@@ -260,13 +260,14 @@ def ingest_raw_turns(samples: list[dict], namespace: str = "locomo") -> int:
 def ingest_session_context(
     samples: list[dict],
     namespace: str = "locomo_context",
-    window_size: int = 5,
-    stride: int = 2,
+    window_size: int = 10,
+    stride: int = 3,
 ) -> int:
     """Ingest overlapping multi-turn windows for richer semantic context.
 
     Each window contains `window_size` consecutive turns with `stride` step,
     giving the embedding more context than a single turn.
+    Larger windows (10) capture more context for better retrieval.
     """
     embeddings = get_embeddings()
 
@@ -281,11 +282,12 @@ def ingest_session_context(
                 if not chunk:
                     continue
                 lines = []
-                for t in chunk:
+                for i, t in enumerate(chunk):
                     speaker = t.get("speaker", t.get("role", "unknown"))
                     utterance = t.get("utterance", t.get("content", t.get("text", "")))
                     if utterance and utterance.strip():
-                        lines.append(f"{speaker}: {utterance}")
+                        # Add turn index for temporal awareness
+                        lines.append(f"[Turn {start+i}] {speaker}: {utterance}")
                 if not lines:
                     continue
                 content = f"[Session {session_id}] " + "\n".join(lines)
@@ -295,6 +297,7 @@ def ingest_session_context(
                         "sample_id": sid,
                         "session_id": session_id,
                         "start_turn": start,
+                        "end_turn": start + len(chunk),
                         "window_size": len(chunk),
                         "source": "locomo_context",
                     },
@@ -328,6 +331,86 @@ def ingest_session_context(
     conn.commit()
     conn.close()
     print(f"  Ingested {total} context windows into '{namespace}'.")
+    return total
+
+
+def ingest_cross_session_summary(
+    samples: list[dict],
+    namespace: str = "locomo_cross_session",
+) -> int:
+    """Ingest cross-session summaries to help with multi-session questions.
+
+    For each sample, creates a summary document that combines key entities
+    and facts from all sessions, enabling cross-session retrieval.
+    """
+    embeddings = get_embeddings()
+
+    summaries = []
+    for sample in samples:
+        sid = sample["sample_id"]
+        # Collect all speakers and key content across sessions
+        all_speakers = set()
+        session_summaries = []
+
+        for session in sample["conversation"]:
+            session_id = session["session_id"]
+            turns = [t for t in session["dialogue"] if isinstance(t, dict)]
+            speakers = set()
+            key_phrases = []
+
+            for t in turns:
+                speaker = t.get("speaker", t.get("role", "unknown"))
+                utterance = t.get("utterance", t.get("content", t.get("text", "")))
+                speakers.add(speaker)
+                # Extract key phrases (names, places, events)
+                if utterance and len(utterance) > 20:
+                    key_phrases.append(utterance[:200])
+
+            all_speakers.update(speakers)
+            if key_phrases:
+                session_summaries.append(
+                    f"Session {session_id} ({', '.join(speakers)}): "
+                    + " | ".join(key_phrases[:3])
+                )
+
+        if session_summaries:
+            content = (
+                f"Cross-session summary for sample {sid}. "
+                f"Speakers: {', '.join(all_speakers)}. "
+                + " ".join(session_summaries)
+            )
+            summaries.append({
+                "content": content,
+                "metadata": {
+                    "sample_id": sid,
+                    "type": "cross_session_summary",
+                    "session_count": len(sample["conversation"]),
+                    "source": "locomo_cross_session",
+                },
+            })
+
+    # Batch embed and insert
+    conn = psycopg.connect(get_db_url())
+    register_vector(conn)
+
+    total = 0
+    for i in range(0, len(summaries), BATCH_SIZE):
+        batch = summaries[i : i + BATCH_SIZE]
+        contents = [s["content"] for s in batch]
+        vectors = embeddings.embed_documents(contents)
+
+        for entry, vec in zip(batch, vectors):
+            entry_id = str(uuid.uuid4())
+            conn.execute(
+                "INSERT INTO archival_memory (id, namespace, content, metadata, embedding) "
+                "VALUES (%s, %s, %s, %s, %s) ON CONFLICT (id) DO NOTHING",
+                (entry_id, namespace, entry["content"], json.dumps(entry["metadata"]), Vector(vec)),
+            )
+            total += 1
+
+    conn.commit()
+    conn.close()
+    print(f"  Ingested {total} cross-session summaries into '{namespace}'.")
     return total
 
 
@@ -457,12 +540,13 @@ def _strip_json_fences(text: str) -> str:
 
 
 def search_archival(
-    query: str, namespace: str, limit: int = 10, alpha: float = 0.7
+    query: str, namespace: str, limit: int = 10, alpha: float = 0.5
 ) -> list[dict]:
     """Hybrid search in archival memory.
 
-    Uses plainto_tsquery with 'english' config (strips stop words, stems)
-    and normalizes ts_rank to [0,1].
+    Uses websearch_to_tsquery for better query parsing (handles phrases, OR, etc.)
+    and scales BM25 score by 10 for better balance with vector similarity.
+    alpha=0.5 gives equal weight to vector and BM25.
     """
     embeddings = get_embeddings()
     query_embedding = Vector(embeddings.embed_query(query))
@@ -473,11 +557,11 @@ def search_archival(
         """
         SELECT content, metadata,
                %s * (1 - (embedding <=> %s::vector))
-                 + (1 - %s) * LEAST(1, ts_rank(content_tsv, plainto_tsquery('english', %s)) * 5)
+                 + (1 - %s) * LEAST(1, ts_rank(content_tsv, websearch_to_tsquery('english', %s)) * 10)
                AS score
         FROM archival_memory
         WHERE namespace = %s
-          AND 1 - (embedding <=> %s::vector) > 0.15
+          AND 1 - (embedding <=> %s::vector) > 0.10
         ORDER BY score DESC
         LIMIT %s
         """,

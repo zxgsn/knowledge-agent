@@ -37,6 +37,7 @@ from test_locomo import (
     clean_namespace,
     compare_strategies,
     evaluate_recall,
+    ingest_cross_session_summary,
     ingest_extracted_facts,
     ingest_raw_turns,
     ingest_session_context,
@@ -268,16 +269,16 @@ def run_benchmark(
     print_results(results, "Baseline")
     all_results["Baseline (raw turns)"] = results
 
-    # Strategy 2: Context windows
+    # Strategy 2: Context windows (w=10, s=3)
     print("\n" + "-" * 50)
-    print("  [2/4] Session context windows (w=5, s=2)")
+    print("  [2/4] Session context windows (w=10, s=3)")
     print("-" * 50)
     ns = "locomo_bench_context"
     clean_namespace(ns)
     ingest_session_context(samples, namespace=ns)
     results = evaluate_recall(samples, ns, k_values, evidence_index=ev_index)
     print_results(results, "Context Windows")
-    all_results["Context windows (w=5)"] = results
+    all_results["Context windows (w=10)"] = results
 
     if not skip_llm:
         # Strategy 3: Extracted facts (mem0-style)
@@ -291,17 +292,18 @@ def run_benchmark(
         print_results(results, "Extracted Facts")
         all_results["Extracted facts (mem0)"] = results
 
-        # Strategy 4: Hybrid (context + extracted)
+        # Strategy 4: Hybrid (context + extracted + cross-session)
         print("\n" + "-" * 50)
-        print("  [4/4] Hybrid: Context + Extracted")
+        print("  [4/4] Hybrid: Context + Extracted + Cross-session")
         print("-" * 50)
         ns = "locomo_bench_hybrid"
         clean_namespace(ns)
         ingest_session_context(samples, namespace=ns)
         ingest_extracted_facts(samples, namespace=ns)
+        ingest_cross_session_summary(samples, namespace=ns)
         results = evaluate_recall(samples, ns, k_values, evidence_index=ev_index)
         print_results(results, "Hybrid")
-        all_results["Hybrid (ctx+facts)"] = results
+        all_results["Hybrid (ctx+facts+cross)"] = results
     else:
         print("\n  [skip-llm] Skipping strategies 3 & 4 (require LLM API calls)")
 
