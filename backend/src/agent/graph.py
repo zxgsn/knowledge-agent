@@ -17,8 +17,13 @@ from __future__ import annotations
 import os
 import warnings
 
-# Suppress langgraph deprecation warning about allowed_objects default
-warnings.filterwarnings("ignore", category=DeprecationWarning, module="langgraph.cache.base")
+# Suppress langchain deprecation warning about allowed_objects
+warnings.filterwarnings("ignore", message=".*allowed_objects.*")
+try:
+    from langchain_core._api.deprecation import LangChainPendingDeprecationWarning
+    warnings.filterwarnings("ignore", category=LangChainPendingDeprecationWarning)
+except ImportError:
+    pass
 
 # Pre-import transformers in sync context to avoid blockbuster blocking error.
 # langchain_core lazily imports transformers, which calls os.getcwd() during

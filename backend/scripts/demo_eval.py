@@ -10,6 +10,16 @@ Usage:
 """
 from __future__ import annotations
 
+import warnings
+# Suppress langchain deprecation warning about allowed_objects
+warnings.filterwarnings("ignore", message=".*allowed_objects.*")
+# Suppress LangChainPendingDeprecationWarning
+try:
+    from langchain_core._api.deprecation import LangChainPendingDeprecationWarning
+    warnings.filterwarnings("ignore", category=LangChainPendingDeprecationWarning)
+except ImportError:
+    pass
+
 import asyncio
 import io
 import json
