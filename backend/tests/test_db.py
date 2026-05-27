@@ -405,3 +405,59 @@ class TestCleanupExcess:
 
         mock_get_conn.side_effect = RuntimeError("fail")
         assert cleanup_excess("ns", 100) == 0
+
+
+class TestDeduplicateResults:
+    def test_empty_list(self):
+        from agent.db import _deduplicate_results
+
+        assert _deduplicate_results([]) == []
+
+    def test_single_item(self):
+        from agent.db import _deduplicate_results
+
+        results = [{"content": "test", "score": 0.9}]
+        assert _deduplicate_results(results) == results
+
+    def test_no_duplicates(self):
+        from agent.db import _deduplicate_results
+
+        results = [
+            {"content": "completely different text", "score": 0.9},
+            {"content": "another unique content here", "score": 0.8},
+        ]
+        assert len(_deduplicate_results(results)) == 2
+
+    def test_removes_duplicate(self):
+        from agent.db import _deduplicate_results
+
+        results = [
+            {"content": "the quick brown fox jumps over the lazy dog", "score": 0.9},
+            {"content": "the quick brown fox jumps over the lazy dog", "score": 0.8},
+        ]
+        deduped = _deduplicate_results(results)
+        assert len(deduped) == 1
+        assert deduped[0]["score"] == 0.9  # Keeps higher score
+
+    def test_keeps_similar_but_different(self):
+        from agent.db import _deduplicate_results
+
+        results = [
+            {"content": "the quick brown fox", "score": 0.9},
+            {"content": "a slow red turtle", "score": 0.8},
+        ]
+        assert len(_deduplicate_results(results)) == 2
+
+    def test_threshold_applied(self):
+        from agent.db import _deduplicate_results
+
+        # 90% overlap
+        results = [
+            {"content": "a b c d e f g h i j", "score": 0.9},
+            {"content": "a b c d e f g h i k", "score": 0.8},
+        ]
+        # With default threshold 0.95, should keep both
+        assert len(_deduplicate_results(results, threshold=0.95)) == 2
+
+        # With lower threshold, should dedup
+        assert len(_deduplicate_results(results, threshold=0.8)) == 1

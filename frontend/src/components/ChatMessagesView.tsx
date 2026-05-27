@@ -1,7 +1,7 @@
 import type React from "react";
 import type { Message } from "@langchain/langgraph-sdk";
 import { ScrollArea } from "@/components/ui/scroll-area";
-import { Loader2, Copy, CopyCheck, BookMarked, BookOpen, ChevronDown, ChevronUp } from "lucide-react";
+import { Loader2, Copy, CopyCheck, BookMarked, BookOpen, ChevronDown, ChevronUp, BarChart3 } from "lucide-react";
 import { InputForm } from "@/components/InputForm";
 import { Button } from "@/components/ui/button";
 import { useState, ReactNode } from "react";
@@ -383,13 +383,22 @@ export function ChatMessagesView({
   };
   return (
     <div className="flex flex-col h-full">
-      <Link
-        to="/library"
-        className="absolute top-4 right-4 z-10 flex items-center gap-1.5 text-sm text-neutral-400 hover:text-neutral-100 transition-colors"
-      >
-        <BookOpen className="w-4 h-4" />
-        Library
-      </Link>
+      <div className="absolute top-4 right-4 z-10 flex items-center gap-3">
+        <Link
+          to="/analytics"
+          className="flex items-center gap-1.5 text-sm text-neutral-400 hover:text-neutral-100 transition-colors"
+        >
+          <BarChart3 className="w-4 h-4" />
+          Analytics
+        </Link>
+        <Link
+          to="/library"
+          className="flex items-center gap-1.5 text-sm text-neutral-400 hover:text-neutral-100 transition-colors"
+        >
+          <BookOpen className="w-4 h-4" />
+          Library
+        </Link>
+      </div>
       <ScrollArea className="flex-1 overflow-y-auto overflow-x-hidden" ref={scrollAreaRef}>
         <div className="p-4 md:p-6 space-y-2 max-w-4xl mx-auto pt-16">
           {messages.filter((message) => {

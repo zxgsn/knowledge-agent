@@ -19,6 +19,48 @@ from agent.state import AgentState
 from agent.utils import get_llm
 
 MAX_TOOL_ROUNDS = 5
+# Approximate chars per token for context budget estimation
+CHARS_PER_TOKEN = 4
+# Reserve tokens for system prompt, tools, and response
+CONTEXT_TOKEN_BUDGET = 120_000
+RESERVED_TOKENS = 10_000
+
+
+def _estimate_tokens(text: str) -> int:
+    """Estimate token count from character length."""
+    return len(text) // CHARS_PER_TOKEN
+
+
+def _truncate_to_budget(
+    context_parts: list[str], max_tokens: int
+) -> list[str]:
+    """Truncate context parts to fit within token budget.
+
+    Priority order: core memory > archival > recall > web research.
+    Truncates from the end of lower-priority sections first.
+    """
+    total_tokens = sum(_estimate_tokens(p) for p in context_parts)
+    if total_tokens <= max_tokens:
+        return context_parts
+
+    # Work backwards, truncating lower-priority content first
+    result = list(context_parts)
+    for i in range(len(result) - 1, -1, -1):
+        if total_tokens <= max_tokens:
+            break
+        part_tokens = _estimate_tokens(result[i])
+        excess = total_tokens - max_tokens
+        if excess >= part_tokens:
+            # Remove this part entirely
+            total_tokens -= part_tokens
+            result[i] = ""
+        else:
+            # Truncate this part
+            chars_to_keep = (part_tokens - excess) * CHARS_PER_TOKEN
+            result[i] = result[i][:chars_to_keep] + "\n[... truncated for context budget]"
+            total_tokens -= excess
+
+    return [p for p in result if p]
 
 
 async def respond(state: AgentState, config: RunnableConfig) -> dict:
@@ -102,6 +144,11 @@ async def respond(state: AgentState, config: RunnableConfig) -> dict:
         if summaries:
             context_parts.append(f"[Web Research]\n{summaries}")
         if context_parts:
+            # Truncate context to fit within token budget
+            available_tokens = CONTEXT_TOKEN_BUDGET - RESERVED_TOKENS - _estimate_tokens(system)
+            for msg in messages_for_llm[1:]:  # Exclude system message
+                available_tokens -= _estimate_tokens(msg.get("content", ""))
+            context_parts = _truncate_to_budget(context_parts, max(available_tokens, 1000))
             messages_for_llm.append({
                 "role": "user",
                 "content": "\n\n".join(context_parts),

@@ -233,3 +233,20 @@ Determine:
 Respond with ONLY a JSON object:
 {{"is_sufficient": true/false, "confidence": "high|medium|low", "reason": "..."}}
 """
+
+HYDE_PROMPT = """Write a short paragraph (2-3 sentences) that would perfectly answer this question. This will be used as a hypothetical document for semantic search.
+
+Question: {query}
+
+Respond with ONLY the hypothetical answer text (no JSON, no formatting).
+"""
+
+QUERY_REWRITE_PROMPT = """Given the conversation history, rewrite the user's latest message to be a standalone search query that captures the full context.
+
+Conversation history:
+{history}
+
+Latest message: {latest_message}
+
+Respond with ONLY the rewritten query (no JSON, no explanation).
+"""

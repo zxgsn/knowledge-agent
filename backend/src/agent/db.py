@@ -31,6 +31,34 @@ def _cosine_similarity(a: list[float], b: list[float]) -> float:
     return dot / (norm_a * norm_b)
 
 
+def _deduplicate_results(
+    results: list[dict], threshold: float = 0.95
+) -> list[dict]:
+    """Remove near-duplicate results based on content similarity.
+
+    Keeps the higher-scored version when two results have content
+    overlap exceeding the threshold.
+    """
+    if len(results) <= 1:
+        return results
+
+    deduped = []
+    for r in results:
+        r_words = set(r["content"].lower().split())
+        is_dup = False
+        for kept in deduped:
+            kept_words = set(kept["content"].lower().split())
+            if not r_words or not kept_words:
+                continue
+            overlap = len(r_words & kept_words) / min(len(r_words), len(kept_words))
+            if overlap > threshold:
+                is_dup = True
+                break
+        if not is_dup:
+            deduped.append(r)
+    return deduped
+
+
 def _mmr_rerank(
     query_embedding: list[float],
     results: list[dict],
@@ -114,7 +142,7 @@ def search_archival(
                 f"""
                 SELECT content, metadata, namespace,
                        %s * (1 - (embedding <=> %s::vector))
-                         + (1 - %s) * LEAST(1, ts_rank(content_tsv, plainto_tsquery('{_TS_CONFIG}', %s)) * 5)
+                         + (1 - %s) * LEAST(1, ts_rank(content_tsv, websearch_to_tsquery('{_TS_CONFIG}', %s)) * 10)
                        AS score
                 FROM archival_memory
                 WHERE status = 'active' AND 1 - (embedding <=> %s::vector) > 0.15
@@ -147,6 +175,9 @@ def search_archival(
         _lambda = mmr_lambda if mmr_lambda is not None else float(os.getenv("MMR_LAMBDA", "0.5"))
         results = _mmr_rerank(query_embedding_flat, results, lambda_param=_lambda, top_k=int(limit))
 
+    # Content-based deduplication
+    results = _deduplicate_results(results)
+
     return results
 
 
@@ -161,7 +192,8 @@ def search_archival_for_dedup(
     try:
         embeddings = get_embeddings()
         query_embedding = Vector(embeddings.embed_query(query))
-    except Exception:
+    except Exception as e:
+        logger.error("Dedup embedding failed: %s", e)
         return []
 
     try:
@@ -179,7 +211,8 @@ def search_archival_for_dedup(
                 """,
                 (query_embedding, namespace, query_embedding, int(limit)),
             ).fetchall()
-    except Exception:
+    except Exception as e:
+        logger.error("Dedup search failed: %s", e)
         return []
 
     results = []
@@ -592,7 +625,8 @@ def get_all_facts(namespace: str = "conversation_facts", limit: int = 500) -> li
                 "WHERE namespace = %s AND status = 'active' ORDER BY created_at DESC LIMIT %s",
                 (namespace, int(limit)),
             ).fetchall()
-    except Exception:
+    except Exception as e:
+        logger.error("get_all_facts failed: %s", e)
         return []
 
     results = []
@@ -613,7 +647,8 @@ def get_existing_memories(
     try:
         embeddings = get_embeddings()
         query_embedding = Vector(embeddings.embed_query(query))
-    except Exception:
+    except Exception as e:
+        logger.error("get_existing_memories embedding failed: %s", e)
         return []
 
     try:
@@ -628,7 +663,8 @@ def get_existing_memories(
                 """,
                 (namespace, query_embedding, int(limit)),
             ).fetchall()
-    except Exception:
+    except Exception as e:
+        logger.error("get_existing_memories search failed: %s", e)
         return []
 
     results = []
@@ -649,7 +685,8 @@ def cleanup_namespace(namespace: str, max_age_days: int) -> int:
             )
             conn.commit()
             return result.rowcount
-    except Exception:
+    except Exception as e:
+        logger.error("cleanup_namespace failed: %s", e)
         return 0
 
 
@@ -680,7 +717,8 @@ def cleanup_excess(namespace: str, max_entries: int) -> int:
 
             conn.commit()
             return len(excess_ids)
-    except Exception:
+    except Exception as e:
+        logger.error("cleanup_excess failed: %s", e)
         return 0
 
 
@@ -694,7 +732,8 @@ def get_recent_archival(limit: int = 5) -> list[dict]:
                 "ORDER BY created_at DESC LIMIT %s",
                 (int(limit),),
             ).fetchall()
-    except Exception:
+    except Exception as e:
+        logger.error("get_recent_archival failed: %s", e)
         return []
 
     results = []
@@ -845,7 +884,8 @@ def get_recent_recall(limit: int = 5, thread_id: str | None = None) -> list[dict
                     "FROM recall_memory ORDER BY created_at DESC LIMIT %s",
                     (int(limit),),
                 ).fetchall()
-    except Exception:
+    except Exception as e:
+        logger.error("get_recent_recall failed: %s", e)
         return []
 
     results = []
@@ -905,5 +945,6 @@ def cleanup_recall(
 
             conn.commit()
             return expired_count, excess_count
-    except Exception:
+    except Exception as e:
+        logger.error("cleanup_recall failed: %s", e)
         return 0, 0

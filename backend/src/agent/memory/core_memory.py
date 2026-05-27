@@ -101,7 +101,7 @@ class CoreMemory:
         )
         from langchain_core.messages import HumanMessage
         response = await llm.ainvoke([HumanMessage(content=prompt)])
-        block.value = response.content
+        self.update_block_value(label, response.content, record=True)
         return True
 
     def get_blocks_needing_compression(self) -> list[str]:

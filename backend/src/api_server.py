@@ -166,9 +166,11 @@ def get_archival_stats():
                    MIN(created_at)::text, MAX(created_at)::text
             FROM archival_memory
             WHERE status = 'active'
+              AND namespace NOT LIKE %s
             GROUP BY namespace
             ORDER BY COUNT(*) DESC
-            """
+            """,
+            ("locomo%",),
         ).fetchall()
     return [
         NamespaceStats(
@@ -195,12 +197,17 @@ def list_archival_entries(
     if namespace:
         where_clauses.append("namespace = %s")
         params.append(namespace)
-    elif exclude_namespaces:
-        ns_list = [ns.strip() for ns in exclude_namespaces.split(",") if ns.strip()]
-        if ns_list:
-            placeholders = ", ".join(["%s"] * len(ns_list))
-            where_clauses.append(f"namespace NOT IN ({placeholders})")
-            params.extend(ns_list)
+    else:
+        # Always exclude locomo benchmark namespaces
+        where_clauses.append("namespace NOT LIKE %s")
+        params.append("locomo%")
+
+        if exclude_namespaces:
+            ns_list = [ns.strip() for ns in exclude_namespaces.split(",") if ns.strip()]
+            if ns_list:
+                placeholders = ", ".join(["%s"] * len(ns_list))
+                where_clauses.append(f"namespace NOT IN ({placeholders})")
+                params.extend(ns_list)
 
     if search:
         where_clauses.append(
@@ -505,6 +512,50 @@ def delete_version_entry(version_id: str):
     return {"deleted": True, "version_id": version_id}
 
 
+@app.get("/api/archival/entries/{entry_id}/diff")
+def get_version_diff(entry_id: str, v1: int = Query(...), v2: int = Query(...)):
+    """Get a diff between two versions of an archival entry."""
+    from fastapi import HTTPException
+
+    from agent.db import get_version_history
+
+    versions = get_version_history(entry_id)
+    ver1 = next((v for v in versions if v["version_number"] == v1), None)
+    ver2 = next((v for v in versions if v["version_number"] == v2), None)
+
+    if not ver1 or not ver2:
+        raise HTTPException(status_code=404, detail="Version not found")
+
+    # Simple word-level diff
+    words1 = ver1["content"].split()
+    words2 = ver2["content"].split()
+
+    # Find common prefix and suffix
+    prefix_len = 0
+    while prefix_len < min(len(words1), len(words2)) and words1[prefix_len] == words2[prefix_len]:
+        prefix_len += 1
+
+    suffix_len = 0
+    while (suffix_len < min(len(words1), len(words2)) - prefix_len
+           and words1[len(words1) - 1 - suffix_len] == words2[len(words2) - 1 - suffix_len]):
+        suffix_len += 1
+
+    removed = words1[prefix_len:len(words1) - suffix_len] if suffix_len > 0 else words1[prefix_len:]
+    added = words2[prefix_len:len(words2) - suffix_len] if suffix_len > 0 else words2[prefix_len:]
+
+    return {
+        "entry_id": entry_id,
+        "v1": v1,
+        "v2": v2,
+        "v1_content": ver1["content"],
+        "v2_content": ver2["content"],
+        "removed": " ".join(removed),
+        "added": " ".join(added),
+        "v1_changed_by": ver1["changed_by"],
+        "v2_changed_by": ver2["changed_by"],
+    }
+
+
 # --- Conflict Review endpoints ---
 
 
@@ -527,6 +578,28 @@ def resolve_conflict_endpoint(review_id: str, req: ResolveConflictRequest):
             status_code=404, detail="Conflict review not found or already resolved"
         )
     return {"resolved": True, "review_id": review_id, "action": req.action}
+
+
+class BulkResolveRequest(BaseModel):
+    review_ids: list[str]
+    action: str  # "approve" | "reject"
+
+
+@app.post("/api/conflicts/bulk-resolve")
+def bulk_resolve_conflicts(req: BulkResolveRequest):
+    """Resolve multiple conflict reviews at once."""
+    from agent.db import resolve_conflict
+
+    resolved = []
+    failed = []
+    for review_id in req.review_ids:
+        success = resolve_conflict(review_id, req.action)
+        if success:
+            resolved.append(review_id)
+        else:
+            failed.append(review_id)
+
+    return {"resolved": resolved, "failed": failed}
 
 
 # --- Delete endpoints ---
@@ -671,13 +744,61 @@ def delete_recall_by_thread(thread_id: str = Query(...)):
 
     return {"deleted": True, "thread_id": thread_id, "count": result.rowcount}
 
+
+# --- Analytics endpoints ---
+
+
+@app.get("/api/analytics/stats")
+def get_analytics_stats():
+    """Get memory analytics statistics."""
+    from agent.storage import get_conn
+
+    stats = {}
+
     with get_conn() as conn:
-        result = conn.execute(
-            "DELETE FROM recall_memory WHERE id = %s", (entry_id,)
-        )
-        conn.commit()
+        # Archival memory stats
+        row = conn.execute(
+            "SELECT COUNT(*), COUNT(DISTINCT namespace) FROM archival_memory WHERE status = 'active'"
+        ).fetchone()
+        stats["archival_count"] = row[0]
+        stats["namespace_count"] = row[1]
 
-    if result.rowcount == 0:
-        raise HTTPException(status_code=404, detail="Entry not found")
+        # Namespace breakdown
+        ns_rows = conn.execute(
+            "SELECT namespace, COUNT(*) FROM archival_memory "
+            "WHERE status = 'active' GROUP BY namespace ORDER BY COUNT(*) DESC"
+        ).fetchall()
+        stats["namespaces"] = [{"namespace": r[0], "count": r[1]} for r in ns_rows]
 
-    return {"deleted": True, "entry_id": entry_id}
+        # Recall memory stats
+        row = conn.execute("SELECT COUNT(*), COUNT(DISTINCT thread_id) FROM recall_memory").fetchone()
+        stats["recall_count"] = row[0]
+        stats["thread_count"] = row[1]
+
+        # Document stats
+        row = conn.execute("SELECT COUNT(*) FROM documents").fetchone()
+        stats["document_count"] = row[0]
+
+        # Conflict stats
+        row = conn.execute("SELECT COUNT(*) FROM conflict_reviews WHERE status = 'pending'").fetchone()
+        stats["pending_conflicts"] = row[0]
+
+        # Version history stats
+        row = conn.execute("SELECT COUNT(*) FROM archival_versions").fetchone()
+        stats["version_count"] = row[0]
+
+        # Age distribution (last 7 days, 30 days, older)
+        row = conn.execute(
+            "SELECT "
+            "COUNT(*) FILTER (WHERE created_at > NOW() - INTERVAL '7 days'), "
+            "COUNT(*) FILTER (WHERE created_at > NOW() - INTERVAL '30 days' AND created_at <= NOW() - INTERVAL '7 days'), "
+            "COUNT(*) FILTER (WHERE created_at <= NOW() - INTERVAL '30 days') "
+            "FROM archival_memory WHERE status = 'active'"
+        ).fetchone()
+        stats["age_distribution"] = {
+            "last_7_days": row[0],
+            "last_30_days": row[1],
+            "older": row[2],
+        }
+
+    return stats

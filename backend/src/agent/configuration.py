@@ -23,8 +23,8 @@ class Configuration(BaseModel):
         metadata={"description": "LLM API key."},
     )
     embedding_model: str = Field(
-        default="text-embedding-v3",
-        metadata={"description": "DashScope embedding model name."},
+        default="BAAI/bge-m3",
+        metadata={"description": "Embedding model name (sentence-transformers)."},
     )
     number_of_initial_queries: int = Field(
         default=3,

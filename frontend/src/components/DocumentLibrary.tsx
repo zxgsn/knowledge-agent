@@ -101,6 +101,18 @@ interface ConflictReviewItem {
   created_at: string | null;
 }
 
+interface VersionDiff {
+  entry_id: string;
+  v1: number;
+  v2: number;
+  v1_content: string;
+  v2_content: string;
+  removed: string;
+  added: string;
+  v1_changed_by: string;
+  v2_changed_by: string;
+}
+
 function getTrustLabel(source: string): string {
   const trusted: Record<string, string> = {
     research_summary: "verified", manual: "verified", manual_save: "verified",
@@ -134,6 +146,8 @@ export function DocumentLibrary() {
   const [conflicts, setConflicts] = useState<ConflictReviewItem[]>([]);
   const [conflictEditId, setConflictEditId] = useState<string | null>(null);
   const [conflictEditText, setConflictEditText] = useState("");
+  const [versionDiff, setVersionDiff] = useState<VersionDiff | null>(null);
+  const [selectedConflicts, setSelectedConflicts] = useState<Set<string>>(new Set());
 
   const fetchStats = useCallback(async () => {
     try {
@@ -143,7 +157,7 @@ export function DocumentLibrary() {
       ]);
       if (archivalRes.ok) setStats(await archivalRes.json());
       if (recallRes.ok) setRecallStats(await recallRes.json());
-    } catch { /* ignore */ }
+    } catch (err) { console.error("Failed to fetch stats:", err); }
   }, []);
 
   const fetchDocuments = useCallback(async () => {
@@ -157,7 +171,7 @@ export function DocumentLibrary() {
         setDocuments(data.documents);
         setTotal(data.total);
       }
-    } catch { /* ignore */ }
+    } catch (err) { console.error("Failed to fetch documents:", err); }
     setLoading(false);
   }, [search]);
 
@@ -167,7 +181,7 @@ export function DocumentLibrary() {
       if (res.ok) {
         setSelectedDoc(await res.json());
       }
-    } catch { /* ignore */ }
+    } catch (err) { console.error("Failed to fetch doc detail:", err); }
   }, []);
 
   const fetchEntries = useCallback(async () => {
@@ -220,7 +234,7 @@ export function DocumentLibrary() {
         setRecallEntries([]);
         setDocuments([]);
       }
-    } catch { /* ignore */ }
+    } catch (err) { console.error("Failed to fetch entries:", err); }
     setLoading(false);
   }, [activeTab, search]);
 
@@ -231,14 +245,14 @@ export function DocumentLibrary() {
         setVersions(await res.json());
         setShowVersionsFor(entryId);
       }
-    } catch { /* ignore */ }
+    } catch (err) { console.error("Failed to fetch versions:", err); }
   }, []);
 
   const fetchConflicts = useCallback(async () => {
     try {
       const res = await fetch(`${API_BASE}/api/conflicts?limit=50`);
       if (res.ok) setConflicts(await res.json());
-    } catch { /* ignore */ }
+    } catch (err) { console.error("Failed to fetch conflicts:", err); }
   }, []);
 
   const handleRefresh = useCallback(() => {
@@ -264,7 +278,7 @@ export function DocumentLibrary() {
         setVersions([]);
         handleRefresh();
       }
-    } catch { /* ignore */ }
+    } catch (err) { console.error("Failed to rollback:", err); }
   }, [handleRefresh]);
 
   const handleDeleteVersion = useCallback(async (versionId: string) => {
@@ -274,7 +288,7 @@ export function DocumentLibrary() {
       if (res.ok) {
         setVersions((prev) => prev.filter((v) => v.version_id !== versionId));
       }
-    } catch { /* ignore */ }
+    } catch (err) { console.error("Failed to delete version:", err); }
   }, []);
 
   const handleResolveConflict = useCallback(async (reviewId: string, action: string, resolutionText?: string) => {
@@ -289,19 +303,51 @@ export function DocumentLibrary() {
         setConflictEditId(null);
         setConflictEditText("");
       }
-    } catch { /* ignore */ }
+    } catch (err) { console.error("Failed to resolve conflict:", err); }
+  }, []);
+
+  const fetchDiff = useCallback(async (entryId: string, v1: number, v2: number) => {
+    try {
+      const res = await fetch(`${API_BASE}/api/archival/entries/${entryId}/diff?v1=${v1}&v2=${v2}`);
+      if (res.ok) setVersionDiff(await res.json());
+    } catch (err) { console.error("Failed to fetch diff:", err); }
+  }, []);
+
+  const handleBulkResolve = useCallback(async (action: string) => {
+    if (selectedConflicts.size === 0) return;
+    try {
+      const res = await fetch(`${API_BASE}/api/conflicts/bulk-resolve`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ review_ids: Array.from(selectedConflicts), action }),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setConflicts((prev) => prev.filter((c) => !data.resolved.includes(c.id)));
+        setSelectedConflicts(new Set());
+      }
+    } catch (err) { console.error("Failed to bulk resolve:", err); }
+  }, [selectedConflicts]);
+
+  const toggleConflictSelection = useCallback((id: string) => {
+    setSelectedConflicts((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
   }, []);
 
   const HIDDEN_NAMESPACES = [
-    "locomo_baseline", "locomo_context", "locomo_extracted",
-    "locomo_bench_baseline", "locomo_bench_context",
     "ingested", "conversation_facts", "test",
   ];
+  const isHiddenNamespace = (ns: string) =>
+    ns.startsWith("locomo") || HIDDEN_NAMESPACES.includes(ns);
   const EXCLUDE_NS_PARAM = HIDDEN_NAMESPACES.join(",");
 
-  const visibleStats = stats.filter((s) => !HIDDEN_NAMESPACES.includes(s.namespace));
+  const visibleStats = stats.filter((s) => !isHiddenNamespace(s.namespace));
 
-  const visibleEntries = entries.filter((e) => !HIDDEN_NAMESPACES.includes(e.namespace));
+  const visibleEntries = entries.filter((e) => !isHiddenNamespace(e.namespace));
 
   useEffect(() => { fetchStats(); }, [fetchStats]);
   useEffect(() => {
@@ -664,10 +710,48 @@ export function DocumentLibrary() {
                   <div className="text-center text-neutral-500 py-12">No pending conflicts.</div>
                 ) : (
                   <div className="grid gap-3">
+                    {/* Bulk actions bar */}
+                    {conflicts.length > 0 && (
+                      <div className="flex items-center gap-2 p-2 bg-neutral-800 rounded">
+                        <input
+                          type="checkbox"
+                          checked={selectedConflicts.size === conflicts.length}
+                          onChange={(e) => {
+                            if (e.target.checked) {
+                              setSelectedConflicts(new Set(conflicts.map(c => c.id)));
+                            } else {
+                              setSelectedConflicts(new Set());
+                            }
+                          }}
+                          className="rounded"
+                        />
+                        <span className="text-xs text-neutral-400">
+                          {selectedConflicts.size} selected
+                        </span>
+                        {selectedConflicts.size > 0 && (
+                          <>
+                            <Button size="sm" className="bg-emerald-600 hover:bg-emerald-700 text-white ml-auto"
+                              onClick={() => handleBulkResolve("approve")}>
+                              Approve All
+                            </Button>
+                            <Button size="sm" variant="outline" className="border-red-600 text-red-400"
+                              onClick={() => handleBulkResolve("reject")}>
+                              Reject All
+                            </Button>
+                          </>
+                        )}
+                      </div>
+                    )}
                     {conflicts.map((conflict) => (
                       <Card key={conflict.id} className="bg-neutral-700 border-amber-600/30">
                         <CardContent className="p-3 space-y-2">
                           <div className="flex items-center gap-2">
+                            <input
+                              type="checkbox"
+                              checked={selectedConflicts.has(conflict.id)}
+                              onChange={() => toggleConflictSelection(conflict.id)}
+                              className="rounded"
+                            />
                             <AlertTriangle className="w-4 h-4 text-amber-400" />
                             <span className="text-xs text-neutral-400">
                               Similarity: {(conflict.similarity_score * 100).toFixed(0)}%
@@ -941,7 +1025,7 @@ export function DocumentLibrary() {
                                 </Button>
                                 {showVersionsFor === entry.id && versions.length > 0 && (
                                   <div className="mt-2 space-y-1 border-t border-neutral-600 pt-2">
-                                    {versions.map((v) => (
+                                    {versions.map((v, idx) => (
                                       <div key={v.version_id} className="flex items-center gap-2 text-xs text-neutral-400 bg-neutral-800 rounded p-1.5">
                                         <span className="text-neutral-300 font-mono">v{v.version_number}</span>
                                         <Badge variant="outline" className={`text-[10px] px-1 py-0 ${
@@ -955,6 +1039,19 @@ export function DocumentLibrary() {
                                         </Badge>
                                         <span className="flex-1 truncate">{truncate(v.content, 60)}</span>
                                         <span className="text-neutral-500">{v.changed_by}</span>
+                                        {idx < versions.length - 1 && (
+                                          <Button
+                                            variant="ghost"
+                                            size="sm"
+                                            className="h-5 text-[10px] text-blue-400 hover:text-blue-300"
+                                            onClick={(e) => {
+                                              e.stopPropagation();
+                                              fetchDiff(entry.id, versions[idx + 1].version_number, v.version_number);
+                                            }}
+                                          >
+                                            Compare
+                                          </Button>
+                                        )}
                                         <Button
                                           variant="ghost"
                                           size="sm"
@@ -1042,6 +1139,36 @@ export function DocumentLibrary() {
           </div>
         </Tabs>
       </div>
+
+      {/* Version Diff Modal */}
+      {versionDiff && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50" onClick={() => setVersionDiff(null)}>
+          <div className="bg-neutral-800 rounded-lg p-4 max-w-2xl w-full mx-4 max-h-[80vh] overflow-y-auto" onClick={(e) => e.stopPropagation()}>
+            <div className="flex items-center justify-between mb-3">
+              <h3 className="text-sm font-medium text-neutral-200">
+                Version Diff: v{versionDiff.v1} → v{versionDiff.v2}
+              </h3>
+              <Button variant="ghost" size="sm" onClick={() => setVersionDiff(null)} className="text-neutral-400">
+                Close
+              </Button>
+            </div>
+            <div className="grid grid-cols-2 gap-3 mb-3">
+              <div className="text-xs text-neutral-500">v{versionDiff.v1} by {versionDiff.v1_changed_by}</div>
+              <div className="text-xs text-neutral-500">v{versionDiff.v2} by {versionDiff.v2_changed_by}</div>
+            </div>
+            <div className="grid grid-cols-2 gap-3">
+              <div className="bg-neutral-900 rounded p-2 text-xs">
+                <p className="text-red-400 mb-1">Removed:</p>
+                <p className="text-neutral-300">{versionDiff.removed || "(none)"}</p>
+              </div>
+              <div className="bg-neutral-900 rounded p-2 text-xs">
+                <p className="text-emerald-400 mb-1">Added:</p>
+                <p className="text-neutral-300">{versionDiff.added || "(none)"}</p>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

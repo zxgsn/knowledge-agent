@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 from datetime import datetime, timezone
 
+from langchain_core.callbacks import dispatch_custom_event
 from langchain_core.messages import AIMessage, HumanMessage
 from langchain_core.runnables import RunnableConfig
 
@@ -36,6 +37,54 @@ from agent.prompts import (
 from agent.state import AgentState
 from agent.utils import get_llm, parse_json
 
+# Threshold for triggering message summarization
+SUMMARIZE_THRESHOLD = 30
+SUMMARIZE_KEEP_RECENT = 10
+
+
+async def summarize_old_messages(
+    messages: list, llm, keep_recent: int = SUMMARIZE_KEEP_RECENT
+) -> list:
+    """Summarize old conversation messages to prevent context overflow.
+
+    Keeps the most recent `keep_recent` messages intact and summarizes
+    all older messages into a single summary message.
+    """
+    if len(messages) <= SUMMARIZE_THRESHOLD:
+        return messages
+
+    old_messages = messages[:-keep_recent]
+    recent_messages = messages[-keep_recent:]
+
+    # Build text from old messages
+    parts = []
+    for msg in old_messages:
+        if isinstance(msg, HumanMessage):
+            parts.append(f"User: {msg.content[:300]}")
+        elif isinstance(msg, AIMessage) and msg.content:
+            parts.append(f"Assistant: {msg.content[:300]}")
+
+    if not parts:
+        return messages
+
+    old_text = "\n".join(parts)
+    prompt = (
+        "Summarize this conversation history into a concise paragraph. "
+        "Preserve key facts, decisions, and context. "
+        "Output ONLY the summary text.\n\n"
+        f"{old_text}"
+    )
+
+    try:
+        response = await llm.ainvoke(prompt)
+        summary = response.content.strip()
+    except Exception:
+        return messages
+
+    # Replace old messages with summary
+    summary_msg = HumanMessage(content=f"[Conversation Summary]\n{summary}")
+    return [summary_msg] + recent_messages
+
 
 # --- Graph nodes ---
 
@@ -52,8 +101,13 @@ async def memory_pipeline(state: AgentState, config: RunnableConfig) -> dict:
     if not configurable.memory_selective_enabled:
         return {"turn_count": turn_count}
 
-    # Extract last user + assistant messages
+    # Summarize old messages if conversation is getting long
     messages = state["messages"]
+    if len(messages) > SUMMARIZE_THRESHOLD:
+        llm = get_llm(configurable, temperature=0.2)
+        messages = await summarize_old_messages(messages, llm)
+
+    # Extract last user + assistant messages
     user_msg = ""
     assistant_msg = ""
     for msg in reversed(messages):
@@ -70,6 +124,7 @@ async def memory_pipeline(state: AgentState, config: RunnableConfig) -> dict:
     llm = get_llm(configurable, temperature=0.0)
 
     # Step 1: Judge if this turn is worth remembering
+    dispatch_custom_event("progress", {"stage": "memory_pipeline", "detail": "Judging if memorable..."}, config=config)
     judgment_prompt = MEMORY_JUDGMENT_PROMPT.format(
         user_message=user_msg,
         assistant_message=assistant_msg,
@@ -105,6 +160,7 @@ async def memory_pipeline(state: AgentState, config: RunnableConfig) -> dict:
         )
 
     # Step 3: Extract memory operations
+    dispatch_custom_event("progress", {"stage": "memory_pipeline", "detail": "Extracting memory operations..."}, config=config)
     extraction_prompt = SELECTIVE_EXTRACTION_PROMPT.format(
         existing_memories=existing_text,
         user_message=user_msg,
@@ -370,6 +426,7 @@ async def _consolidate_namespace(
 
 async def consolidate_memory(state: AgentState, config: RunnableConfig) -> dict:
     """Periodic consolidation: dedup, merge, and cleanup across all managed namespaces."""
+    dispatch_custom_event("progress", {"stage": "consolidate_memory", "detail": "Consolidating memories..."}, config=config)
     configurable = Configuration.from_runnable_config(config)
     merge_llm = get_llm(configurable, temperature=0.2)
 

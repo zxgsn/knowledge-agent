@@ -6,6 +6,7 @@ import { ProcessedEvent } from "@/components/ActivityTimeline";
 import { WelcomeScreen } from "@/components/WelcomeScreen";
 import { ChatMessagesView } from "@/components/ChatMessagesView";
 import { DocumentLibrary } from "@/components/DocumentLibrary";
+import { MemoryAnalytics } from "@/components/MemoryAnalytics";
 import { CoreMemoryPanel } from "@/components/CoreMemoryPanel";
 import { ThreadSidebar } from "@/components/ThreadSidebar";
 import { Button } from "@/components/ui/button";
@@ -384,6 +385,7 @@ export default function App() {
     <div className="flex h-screen bg-neutral-800 text-neutral-100 font-sans antialiased">
       <Routes>
         <Route path="/library" element={<DocumentLibrary />} />
+        <Route path="/analytics" element={<MemoryAnalytics />} />
         <Route
           path="*"
           element={
