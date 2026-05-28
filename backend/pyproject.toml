@@ -16,7 +16,6 @@ dependencies = [
     "fastapi",
     "psycopg[binary]>=3.1",
     "pgvector>=0.3.0",
-    "dashscope",
     "tavily-python",
     "pypdf>=5.0",
     "beautifulsoup4>=4.12",
