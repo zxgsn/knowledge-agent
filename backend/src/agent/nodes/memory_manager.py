@@ -6,6 +6,7 @@ import asyncio
 import json
 import re
 
+from langchain_core.callbacks import dispatch_custom_event
 from langchain_core.messages import HumanMessage
 from langchain_core.runnables import RunnableConfig
 
@@ -152,16 +153,19 @@ async def recall_memory(state: AgentState, config: RunnableConfig) -> dict:
         }
 
     # Step 1: Query rewriting (if enabled)
+    dispatch_custom_event("progress", {"stage": "memory_search", "detail": "Rewriting query..."}, config=config)
     search_query = user_msg
     if configurable.memory_query_rewrite_enabled:
         search_query = await _rewrite_query(user_msg, state["messages"], configurable)
 
     # Step 2: HyDE (if enabled) — generate hypothetical answer for embedding
+    dispatch_custom_event("progress", {"stage": "memory_search", "detail": "Generating search embedding..."}, config=config)
     search_query_for_embed = search_query
     if configurable.hyde_enabled:
         search_query_for_embed = await _generate_hypothetical(search_query, configurable)
 
     # Step 3: Search both archival and recall in parallel
+    dispatch_custom_event("progress", {"stage": "memory_search", "detail": "Searching archival + recall memory..."}, config=config)
     archival_task = asyncio.to_thread(
         search_archival, search_query_for_embed, 5,
         rerank_enabled=configurable.rerank_enabled,
@@ -257,6 +261,7 @@ async def evaluate_recall(state: AgentState, config: RunnableConfig) -> dict:
     memory_content = "\n".join(memory_parts)
 
     # Ask LLM to evaluate
+    dispatch_custom_event("progress", {"stage": "evaluate_recall", "detail": "Evaluating memory relevance..."}, config=config)
     llm = get_llm(configurable, temperature=0)
 
     prompt = EVALUATE_RECALL_PROMPT.format(
@@ -291,6 +296,7 @@ async def save_to_archival(state: AgentState, config: RunnableConfig) -> dict:
     """Extract key findings and save them to archival memory (PostgreSQL)."""
     from datetime import datetime, timezone
 
+    dispatch_custom_event("progress", {"stage": "save_to_archival", "detail": "Extracting key findings..."}, config=config)
     configurable = Configuration.from_runnable_config(config)
     llm = get_llm(configurable, temperature=0.3)
 
@@ -371,6 +377,7 @@ async def ingest_document_node(state: AgentState, config: RunnableConfig) -> dic
 
     from agent.storage.ingestion import ingest_pdf, ingest_text, ingest_url
 
+    dispatch_custom_event("progress", {"stage": "ingest_document", "detail": "Processing document..."}, config=config)
     cfg = Configuration.from_runnable_config(config)
     chunk_params = dict(
         strategy=cfg.chunk_strategy,
@@ -415,12 +422,14 @@ async def ingest_document_node(state: AgentState, config: RunnableConfig) -> dic
 
     try:
         if source_type == "pdf":
+            dispatch_custom_event("progress", {"stage": "ingest_document", "detail": f"Extracting text from PDF: {pdf_filename}..."}, config=config)
             pdf_bytes = base64.b64decode(doc_source)
             chunks = await ingest_pdf(pdf_bytes, filename=pdf_filename or "document.pdf", **chunk_params)
             if not chunks:
                 return {"ingest_result": f"Failed to extract text from PDF: {pdf_filename}"}
             doc_label = pdf_filename or "document.pdf"
         elif source_type == "url":
+            dispatch_custom_event("progress", {"stage": "ingest_document", "detail": f"Fetching URL: {doc_source[:60]}..."}, config=config)
             title, chunks = await ingest_url(doc_source, **chunk_params)
             if not chunks:
                 return {"ingest_result": f"Failed to extract text from URL: {doc_source}"}
@@ -436,6 +445,7 @@ async def ingest_document_node(state: AgentState, config: RunnableConfig) -> dic
                 return {"ingest_result": "No text content to ingest."}
             doc_label = "manual_text"
 
+        dispatch_custom_event("progress", {"stage": "ingest_document", "detail": f"Embedding {len(chunks)} chunks..."}, config=config)
         # Reconstruct full text from chunks for document storage
         full_text = "\n\n".join(c.content for c in chunks)
 

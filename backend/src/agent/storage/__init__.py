@@ -5,17 +5,17 @@ from __future__ import annotations
 import os
 from contextlib import contextmanager
 
-from agent.storage.embedding import DashScopeEmbeddings
+from agent.storage.embedding import LocalEmbeddings
 
-_embeddings: DashScopeEmbeddings | None = None
+_embeddings: LocalEmbeddings | None = None
 _recall_table_ready: bool = False
 _pool = None
 
 
-def get_embeddings() -> DashScopeEmbeddings:
+def get_embeddings() -> LocalEmbeddings:
     global _embeddings
     if _embeddings is None:
-        _embeddings = DashScopeEmbeddings()
+        _embeddings = LocalEmbeddings()
     return _embeddings
 
 
