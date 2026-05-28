@@ -1,0 +1,125 @@
+{
+  "timestamp": "2026-05-27T21:48:27.481047+00:00",
+  "config": {
+    "hyde_enabled": true,
+    "mmr_enabled": true,
+    "llm_judge_enabled": true,
+    "strategy": "hybrid (context windows + extracted facts)",
+    "bm25_optimization": "websearch_to_tsquery * 10",
+    "dedup_threshold": 0.95,
+    "mmr_lambda": 0.7
+  },
+  "optimized": {
+    "R@1": 0.20603015075376885,
+    "R@3": 0.37185929648241206,
+    "R@5": 0.45226130653266333,
+    "R@10": 0.5226130653266332,
+    "MRR": 0.32760030310281574
+  },
+  "optimized_per_type": {
+    "temporal": {
+      "1": {
+        "hits": 2,
+        "total": 37
+      },
+      "3": {
+        "hits": 2,
+        "total": 37
+      },
+      "5": {
+        "hits": 5,
+        "total": 37
+      },
+      "10": {
+        "hits": 3,
+        "total": 37
+      }
+    },
+    "multi_session": {
+      "1": {
+        "hits": 7,
+        "total": 13
+      },
+      "3": {
+        "hits": 9,
+        "total": 13
+      },
+      "5": {
+        "hits": 10,
+        "total": 13
+      },
+      "10": {
+        "hits": 12,
+        "total": 13
+      }
+    },
+    "single_session": {
+      "1": {
+        "hits": 6,
+        "total": 32
+      },
+      "3": {
+        "hits": 7,
+        "total": 32
+      },
+      "5": {
+        "hits": 11,
+        "total": 32
+      },
+      "10": {
+        "hits": 14,
+        "total": 32
+      }
+    },
+    "adversarial": {
+      "1": {
+        "hits": 23,
+        "total": 70
+      },
+      "3": {
+        "hits": 45,
+        "total": 70
+      },
+      "5": {
+        "hits": 51,
+        "total": 70
+      },
+      "10": {
+        "hits": 58,
+        "total": 70
+      }
+    },
+    "event_summary": {
+      "1": {
+        "hits": 3,
+        "total": 47
+      },
+      "3": {
+        "hits": 11,
+        "total": 47
+      },
+      "5": {
+        "hits": 13,
+        "total": 47
+      },
+      "10": {
+        "hits": 17,
+        "total": 47
+      }
+    }
+  },
+  "external_baselines": {
+    "mem0 (paper)": {
+      "R@5": 0.387,
+      "R@10": 0.439
+    },
+    "mem0-graph (paper)": {
+      "R@5": 0.436,
+      "R@10": 0.51
+    },
+    "LoCoMo-RAG (paper)": {
+      "R@5": 0.198,
+      "R@10": 0.265
+    }
+  }
+}

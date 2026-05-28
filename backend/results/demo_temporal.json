@@ -1,0 +1,209 @@
+{
+  "timestamp": "2026-05-27T13:02:30.962105+00:00",
+  "sample_questions": 10,
+  "results": {
+    "Raw Turns": {
+      "metrics": {
+        "1": {
+          "hits": 1,
+          "total": 10
+        },
+        "3": {
+          "hits": 2,
+          "total": 10
+        },
+        "5": {
+          "hits": 3,
+          "total": 10
+        },
+        "10": {
+          "hits": 4,
+          "total": 10
+        }
+      },
+      "mrr": 0.16999999999999998
+    },
+    "Context Windows": {
+      "metrics": {
+        "1": {
+          "hits": 3,
+          "total": 10
+        },
+        "3": {
+          "hits": 9,
+          "total": 10
+        },
+        "5": {
+          "hits": 10,
+          "total": 10
+        },
+        "10": {
+          "hits": 10,
+          "total": 10
+        }
+      },
+      "mrr": 0.57
+    },
+    "Hybrid (ctx+facts)": {
+      "metrics": {
+        "1": {
+          "hits": 4,
+          "total": 10
+        },
+        "3": {
+          "hits": 8,
+          "total": 10
+        },
+        "5": {
+          "hits": 9,
+          "total": 10
+        },
+        "10": {
+          "hits": 10,
+          "total": 10
+        }
+      },
+      "mrr": 0.6144444444444443
+    }
+  },
+  "best_strategy": "Context Windows",
+  "best_r10": 1.0,
+  "details": [
+    {
+      "question": "Where did Alice move to?",
+      "answer": "San Francisco",
+      "type": "single_session",
+      "hit_at": [
+        1,
+        3,
+        5,
+        10
+      ],
+      "top1": "[Alice] Hi Bob! I just moved to San Francisco last week.\n[Bob] That's great! How",
+      "top1_score": 0.5582870908485715
+    },
+    {
+      "question": "What district does Alice live in?",
+      "answer": "Mission District",
+      "type": "single_session",
+      "hit_at": [
+        3,
+        5,
+        10
+      ],
+      "top1": "[Alice] I got a new job at TechCorp as a senior engineer. Started on Monday.\n[Bo",
+      "top1_score": 0.5954964631159536
+    },
+    {
+      "question": "What is Alice's new job?",
+      "answer": "senior engineer at TechCorp",
+      "type": "single_session",
+      "hit_at": [
+        1,
+        3,
+        5,
+        10
+      ],
+      "top1": "[Alice] Hi Bob! I just moved to San Francisco last week.\n[Bob] That's great! How",
+      "top1_score": 0.8690918112171927
+    },
+    {
+      "question": "What is Alice building at work?",
+      "answer": "recommendation system",
+      "type": "single_session",
+      "hit_at": [
+        1,
+        3,
+        5,
+        10
+      ],
+      "top1": "[Alice] Building a new recommendation system. It's challenging but exciting.\n[Bo",
+      "top1_score": 0.5604231019460505
+    },
+    {
+      "question": "How long did Alice live in Portland?",
+      "answer": "5 years",
+      "type": "single_session",
+      "hit_at": [
+        3,
+        5,
+        10
+      ],
+      "top1": "[Alice] Good point. I'll stick with a Lab then. There's a shelter near Dolores P",
+      "top1_score": 0.5667636798695272
+    },
+    {
+      "question": "What restaurant did Alice visit?",
+      "answer": "Sushi Ran in Sausalito",
+      "type": "single_session",
+      "hit_at": [
+        3,
+        5,
+        10
+      ],
+      "top1": "[Alice] Building a new recommendation system. It's challenging but exciting.\n[Bo",
+      "top1_score": 0.5881376801513979
+    },
+    {
+      "question": "What kind of dog is Alice considering?",
+      "answer": "Labrador",
+      "type": "multi_session",
+      "hit_at": [
+        5,
+        10
+      ],
+      "top1": "[Alice] Hi Bob! I just moved to San Francisco last week.\n[Bob] That's great! How",
+      "top1_score": 0.5397489986930197
+    },
+    {
+      "question": "How often does Alice run?",
+      "answer": "3 times a week",
+      "type": "single_session",
+      "hit_at": [
+        3,
+        5,
+        10
+      ],
+      "top1": "[Alice] I got a new job at TechCorp as a senior engineer. Started on Monday.\n[Bo",
+      "top1_score": 0.5721957832960771
+    },
+    {
+      "question": "Where is the dog shelter Alice found?",
+      "answer": "near Dolores Park",
+      "type": "single_session",
+      "hit_at": [
+        3,
+        5,
+        10
+      ],
+      "top1": "[Alice] I got a new job at TechCorp as a senior engineer. Started on Monday.\n[Bo",
+      "top1_score": 0.5566535853147393
+    },
+    {
+      "question": "What did Alice do on Saturday?",
+      "answer": "went to Golden Gate Park",
+      "type": "temporal",
+      "hit_at": [
+        3,
+        5,
+        10
+      ],
+      "top1": "[Alice] I got a new job at TechCorp as a senior engineer. Started on Monday.\n[Bo",
+      "top1_score": 0.5561749042333677
+    }
+  ],
+  "external_baselines": {
+    "mem0": {
+      "R@5": 0.387,
+      "R@10": 0.439
+    },
+    "mem0-graph": {
+      "R@5": 0.436,
+      "R@10": 0.51
+    },
+    "LoCoMo-RAG": {
+      "R@5": 0.198,
+      "R@10": 0.265
+    }
+  }
+}
