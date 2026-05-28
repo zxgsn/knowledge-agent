@@ -15,18 +15,20 @@ class TestFormatArchivalResults:
         assert "fact A" in out
         assert "0.80" in out
 
-    def test_low_score_excluded(self):
+    def test_low_score_included(self):
         results = [{"content": "noise", "score": 0.1}]
-        assert _format_archival_results(results) == ""
+        out = _format_archival_results(results)
+        assert "noise" in out
+        assert "0.10" in out
 
     def test_mixed_scores(self):
         results = [
             {"content": "good", "score": 0.5},
-            {"content": "bad", "score": 0.2},
+            {"content": "low", "score": 0.2},
         ]
         out = _format_archival_results(results)
         assert "good" in out
-        assert "bad" not in out
+        assert "low" in out
 
     def test_multiple_results(self):
         results = [
@@ -50,9 +52,11 @@ class TestFormatRecallResults:
         assert "past msg" in out
         assert "user" in out
 
-    def test_low_score_excluded(self):
+    def test_low_score_included(self):
         results = [{"content": "noise", "role": "user", "score": 0.1}]
-        assert _format_recall_results(results) == ""
+        out = _format_recall_results(results)
+        assert "noise" in out
+        assert "0.10" in out
 
     def test_long_content_truncated(self):
         results = [{"content": "x" * 500, "role": "assistant", "score": 0.9}]
