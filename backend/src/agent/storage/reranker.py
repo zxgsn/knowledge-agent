@@ -10,17 +10,18 @@ Downloaded to backend/models/bge-reranker-v2-m3/ (not HF cache).
 from __future__ import annotations
 
 import os
-import sys
 from pathlib import Path
+
+from agent.logger import get_logger
+from agent.retry import with_retry
+
+logger = get_logger(__name__)
 
 _model = None
 
 
-def _get_model():
-    global _model
-    if _model is not None:
-        return _model
-
+def _load_model():
+    """Load the cross-encoder model (sync, for use with retry)."""
     from sentence_transformers import CrossEncoder
 
     model_name = os.getenv("RERANK_MODEL", "BAAI/bge-reranker-v2-m3")
@@ -29,13 +30,29 @@ def _get_model():
     local_dir = Path(__file__).resolve().parents[3] / "models" / model_name.split("/")[-1]
     if local_dir.is_dir() and (local_dir / "config.json").exists():
         model_path = str(local_dir)
-        print(f"[reranker] Loading local model: {model_path}", file=sys.stderr)
+        logger.info("Loading local reranker model: %s", model_path)
     else:
         model_path = model_name
-        print(f"[reranker] Loading model from HF: {model_path}", file=sys.stderr)
+        logger.info("Loading reranker model from HF: %s", model_path)
 
-    _model = CrossEncoder(model_path, max_length=512)
-    print(f"[reranker] Model loaded.", file=sys.stderr)
+    model = CrossEncoder(model_path, max_length=512)
+    logger.info("Reranker model loaded successfully")
+    return model
+
+
+@with_retry(
+    max_retries=2,
+    base_delay=2.0,
+    max_delay=30.0,
+    retryable_exceptions=(OSError, RuntimeError, ConnectionError),
+)
+def _get_model():
+    """Get or lazily load the cross-encoder model with retry on first load."""
+    global _model
+    if _model is not None:
+        return _model
+
+    _model = _load_model()
     return _model
 
 
@@ -46,6 +63,9 @@ def rerank(
     enabled: bool | None = None,
 ) -> list[dict]:
     """Re-rank search results using cross-encoder scoring.
+
+    Falls back gracefully to the original results (truncated to *top_k*)
+    if the model fails to load or scoring fails.
 
     Args:
         query: The search query.
@@ -62,19 +82,31 @@ def rerank(
     if enabled is None:
         enabled = os.getenv("RERANK_ENABLED", "true").lower() not in ("false", "0", "no")
     if not enabled:
+        logger.debug("Reranking disabled, returning top %d results", top_k)
         return results[:top_k]
 
     try:
         model = _get_model()
-    except Exception as e:
-        print(f"[reranker] Failed to load model: {e}", file=sys.stderr)
+    except Exception as exc:
+        logger.error("Failed to load reranker model after retries: %s", exc)
+        logger.warning("Falling back to original ranking (top %d)", top_k)
         return results[:top_k]
 
-    pairs = [[query, r["content"][:512]] for r in results]
-    scores = model.predict(pairs)
+    try:
+        pairs = [[query, r["content"][:512]] for r in results]
+        scores = model.predict(pairs)
 
-    for r, s in zip(results, scores):
-        r["score"] = float(s)
+        for r, s in zip(results, scores):
+            r["score"] = float(s)
 
-    results.sort(key=lambda x: x["score"], reverse=True)
+        results.sort(key=lambda x: x["score"], reverse=True)
+        logger.debug(
+            "Reranked %d results, top score=%.4f",
+            len(results),
+            results[0]["score"] if results else 0.0,
+        )
+    except Exception as exc:
+        logger.error("Reranking failed: %s — falling back to original order", exc)
+        return results[:top_k]
+
     return results[:top_k]
