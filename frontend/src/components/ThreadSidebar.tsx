@@ -4,7 +4,7 @@ import { MessageSquare, Plus, PanelLeftClose, PanelLeft, Trash2, Loader2 } from 
 import { Client } from "@langchain/langgraph-sdk";
 
 const API_URL = import.meta.env.DEV
-  ? "http://localhost:2024"
+  ? "http://localhost:8123"
   : "http://localhost:8123";
 
 interface Thread {

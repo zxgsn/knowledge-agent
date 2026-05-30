@@ -1,10 +1,28 @@
 from __future__ import annotations
 
 import os
+from pathlib import Path
 from typing import Any, Optional
 
 from langchain_core.runnables import RunnableConfig
 from pydantic import BaseModel, Field
+
+
+def _load_yaml_config() -> dict[str, Any]:
+    """Load feature config from config.yaml (next to backend/)."""
+    try:
+        import yaml
+    except ImportError:
+        return {}
+
+    config_path = Path(__file__).resolve().parents[2] / "config.yaml"
+    if not config_path.is_file():
+        return {}
+
+    with open(config_path, encoding="utf-8") as f:
+        data = yaml.safe_load(f) or {}
+
+    return data.get("features", {})
 
 
 class Configuration(BaseModel):
@@ -79,23 +97,23 @@ class Configuration(BaseModel):
         metadata={"description": "Maximum chunk size in characters for semantic chunking."},
     )
     hyde_enabled: bool = Field(
-        default=False,
+        default=True,
         metadata={"description": "Enable HyDE (Hypothetical Document Embeddings) for archival search."},
     )
     memory_query_rewrite_enabled: bool = Field(
-        default=False,
+        default=True,
         metadata={"description": "Rewrite ambiguous queries using conversation history before memory search."},
     )
     mmr_enabled: bool = Field(
-        default=False,
+        default=True,
         metadata={"description": "Enable MMR deduplication in search results."},
     )
     mmr_lambda: float = Field(
-        default=0.5,
+        default=0.7,
         metadata={"description": "MMR lambda parameter: 1.0=pure relevance, 0.0=pure diversity."},
     )
     proactive_memory_enabled: bool = Field(
-        default=False,
+        default=True,
         metadata={"description": "Proactively push relevant memories at conversation start."},
     )
     proactive_memory_turns: int = Field(
@@ -106,17 +124,35 @@ class Configuration(BaseModel):
         default=0.7,
         metadata={"description": "Confidence threshold below which conflicts are queued for human review."},
     )
+    structured_extraction: bool = Field(
+        default=True,
+        metadata={"description": "Extract entities and temporal references from conversation facts."},
+    )
+    document_enrichment: bool = Field(
+        default=True,
+        metadata={"description": "LLM-assisted extraction of summary/entities/keywords during ingestion."},
+    )
 
     @classmethod
     def from_runnable_config(
         cls, config: Optional[RunnableConfig] = None
     ) -> "Configuration":
+        # Priority: env vars > configurable dict > config.yaml > field defaults
+        yaml_config = _load_yaml_config()
+
         configurable = (
             config["configurable"] if config and "configurable" in config else {}
         )
-        raw_values: dict[str, Any] = {
-            name: os.environ.get(name.upper(), configurable.get(name))
-            for name in cls.model_fields.keys()
-        }
+
+        raw_values: dict[str, Any] = {}
+        for name in cls.model_fields.keys():
+            env_val = os.environ.get(name.upper())
+            if env_val is not None:
+                raw_values[name] = env_val
+            elif name in configurable:
+                raw_values[name] = configurable[name]
+            elif name in yaml_config:
+                raw_values[name] = yaml_config[name]
+
         values = {k: v for k, v in raw_values.items() if v is not None}
         return cls(**values)

@@ -9,7 +9,7 @@ class TestSearchRecallThreadId:
     """Test search_recall thread_id filtering."""
 
     @patch("agent.storage.get_embeddings")
-    @patch("agent.db.get_conn")
+    @patch("agent.db.recall.get_conn")
     def test_search_recall_with_thread_id(self, mock_conn, mock_embeddings):
         """search_recall passes thread_id to SQL WHERE clause when provided."""
         from agent.db import search_recall
@@ -32,7 +32,7 @@ class TestSearchRecallThreadId:
         assert "session-abc" in params
 
     @patch("agent.storage.get_embeddings")
-    @patch("agent.db.get_conn")
+    @patch("agent.db.recall.get_conn")
     def test_search_recall_without_thread_id(self, mock_conn, mock_embeddings):
         """search_recall without thread_id has no thread_id WHERE clause."""
         from agent.db import search_recall
@@ -57,7 +57,7 @@ class TestGetRecentRecallThreadId:
     """Test get_recent_recall thread_id filtering."""
 
     @patch("agent.storage.ensure_recall_table")
-    @patch("agent.db.get_conn")
+    @patch("agent.db.recall.get_conn")
     def test_get_recent_recall_with_thread_id(self, mock_conn, mock_ensure):
         """get_recent_recall filters by thread_id when provided."""
         from agent.db import get_recent_recall
@@ -76,7 +76,7 @@ class TestGetRecentRecallThreadId:
         assert "session-xyz" in params
 
     @patch("agent.storage.ensure_recall_table")
-    @patch("agent.db.get_conn")
+    @patch("agent.db.recall.get_conn")
     def test_get_recent_recall_without_thread_id(self, mock_conn, mock_ensure):
         """get_recent_recall without thread_id returns all threads."""
         from agent.db import get_recent_recall
@@ -98,7 +98,7 @@ class TestSaveToRecallThreadId:
 
     @patch("agent.storage.ensure_recall_table")
     @patch("agent.storage.get_embeddings")
-    @patch("agent.db.get_conn")
+    @patch("agent.db.recall.get_conn")
     def test_save_to_recall_custom_thread(self, mock_conn, mock_embeddings, mock_ensure):
         """save_to_recall stores with custom thread_id."""
         from agent.db import save_to_recall

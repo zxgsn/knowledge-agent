@@ -720,7 +720,7 @@ def llm_judge_answer(
     if not answer.strip():
         return False
 
-    judge_prompt = """You are evaluating whether a retrieved passage contains the answer to a question.
+    judge_prompt = """You are evaluating whether retrieved passages contain the answer to a question.
 
 Question: {question}
 Expected answer: {answer}
@@ -728,14 +728,17 @@ Expected answer: {answer}
 Retrieved passages (top {k}):
 {passages}
 
-Does ANY of the retrieved passages contain information that answers the question with the expected answer?
-Consider paraphrases, synonyms, and implied information. The answer does not need to be word-for-word.
+Does the information in these passages answer the question with the expected answer?
+Rules:
+- The answer can be synthesized across MULTIPLE passages (e.g., summaries, event lists).
+- Consider paraphrases, synonyms, and implied information. No need to be word-for-word.
+- For summary/aggregate questions ("what events", "what topics"), partial matches across passages count as yes.
 
 Respond with ONLY "yes" or "no"."""
 
     passages = []
     for i, r in enumerate(results[:k]):
-        passages.append(f"[{i+1}] {r['content'][:500]}")
+        passages.append(f"[{i+1}] {r['content'][:800]}")
 
     try:
         prompt = judge_prompt.format(

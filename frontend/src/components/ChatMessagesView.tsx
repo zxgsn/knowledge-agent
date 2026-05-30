@@ -1,7 +1,7 @@
 import type React from "react";
 import type { Message } from "@langchain/langgraph-sdk";
 import { ScrollArea } from "@/components/ui/scroll-area";
-import { Loader2, Copy, CopyCheck, BookMarked, BookOpen, ChevronDown, ChevronUp, BarChart3 } from "lucide-react";
+import { Copy, CopyCheck, BookMarked, BookOpen, ChevronDown, ChevronUp, BarChart3 } from "lucide-react";
 import { InputForm } from "@/components/InputForm";
 import { Button } from "@/components/ui/button";
 import { useState, ReactNode } from "react";

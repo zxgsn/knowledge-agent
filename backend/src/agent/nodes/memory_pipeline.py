@@ -1,7 +1,7 @@
 """Memory pipeline: extract, dedup, and consolidate conversation facts.
 
 Implements mem0-style pipeline on top of the existing three-layer architecture:
-- After each turn: extract facts → dedup against archival → upsert
+- After each turn: extract facts -> dedup against archival -> upsert
 - Periodically: batch consolidation via embedding clustering
 """
 
@@ -25,17 +25,23 @@ from agent.db import (
     put_to_archival,
     queue_conflict_review,
     search_archival_for_dedup,
+    touch_memory_access,
     update_archival,
+    update_importance_score,
 )
-
+from agent.memory.importance import calculate_importance
+from agent.logger import get_logger
 from agent.prompts import (
     CONSOLIDATION_MERGE_PROMPT,
     FACT_CONFLICT_PROMPT,
     MEMORY_JUDGMENT_PROMPT,
     SELECTIVE_EXTRACTION_PROMPT,
 )
+from agent.retry import with_retry
 from agent.state import AgentState
 from agent.utils import get_llm, parse_json
+
+logger = get_logger(__name__)
 
 # Threshold for triggering message summarization
 SUMMARIZE_THRESHOLD = 30
@@ -76,9 +82,10 @@ async def summarize_old_messages(
     )
 
     try:
-        response = await llm.ainvoke(prompt)
+        response = await with_retry(max_retries=2)(llm.ainvoke)(prompt)
         summary = response.content.strip()
-    except Exception:
+    except Exception as exc:
+        logger.warning("Message summarization failed after retries: %s", exc)
         return messages
 
     # Replace old messages with summary
@@ -88,12 +95,13 @@ async def summarize_old_messages(
 
 # --- Graph nodes ---
 
+
 async def memory_pipeline(state: AgentState, config: RunnableConfig) -> dict:
-    """Selective memory capture: judge → search existing → extract → upsert.
+    """Selective memory capture: judge -> search existing -> extract -> upsert.
 
     Two-step LLM pipeline:
-    1. MEMORY_JUDGMENT_PROMPT — lightweight check if the turn is worth remembering
-    2. SELECTIVE_EXTRACTION_PROMPT — extract ADD/UPDATE/DELETE ops with existing memory context
+    1. MEMORY_JUDGMENT_PROMPT -- lightweight check if the turn is worth remembering
+    2. SELECTIVE_EXTRACTION_PROMPT -- extract ADD/UPDATE/DELETE ops with existing memory context
     """
     turn_count = state.get("turn_count", 0) + 1
     configurable = Configuration.from_runnable_config(config)
@@ -123,16 +131,18 @@ async def memory_pipeline(state: AgentState, config: RunnableConfig) -> dict:
 
     llm = get_llm(configurable, temperature=0.0)
 
-    # Step 1: Judge if this turn is worth remembering
+    # Step 1: Judge if this turn is worth remembering (with retry)
     dispatch_custom_event("progress", {"stage": "memory_pipeline", "detail": "Judging if memorable..."}, config=config)
     judgment_prompt = MEMORY_JUDGMENT_PROMPT.format(
         user_message=user_msg,
         assistant_message=assistant_msg,
     )
     try:
-        judgment_response = await llm.ainvoke(judgment_prompt)
+        judgment_response = await with_retry(max_retries=2)(llm.ainvoke)(judgment_prompt)
         judgment = parse_json(judgment_response.content)
-    except Exception:
+        logger.debug("Judgment result: memorable=%s reason=%s", judgment.get("memorable"), judgment.get("reason", "")[:80])
+    except Exception as exc:
+        logger.warning("Memory judgment LLM failed after retries: %s", exc)
         return {"turn_count": turn_count}
 
     if not judgment.get("memorable", False):
@@ -149,9 +159,13 @@ async def memory_pipeline(state: AgentState, config: RunnableConfig) -> dict:
 
     # Step 2: Search existing memories for context
     search_query = user_msg[:200]
-    existing = await asyncio.to_thread(
-        get_existing_memories, search_query, "conversation_facts", 10
-    )
+    try:
+        existing = await asyncio.to_thread(
+            get_existing_memories, search_query, "conversation_facts", 10
+        )
+    except Exception as exc:
+        logger.warning("get_existing_memories failed: %s", exc)
+        existing = []
 
     existing_text = "None"
     if existing:
@@ -159,7 +173,7 @@ async def memory_pipeline(state: AgentState, config: RunnableConfig) -> dict:
             f"- [id: {m['id']}] {m['content']}" for m in existing
         )
 
-    # Step 3: Extract memory operations
+    # Step 3: Extract memory operations (with retry)
     dispatch_custom_event("progress", {"stage": "memory_pipeline", "detail": "Extracting memory operations..."}, config=config)
     extraction_prompt = SELECTIVE_EXTRACTION_PROMPT.format(
         existing_memories=existing_text,
@@ -167,9 +181,11 @@ async def memory_pipeline(state: AgentState, config: RunnableConfig) -> dict:
         assistant_message=assistant_msg,
     )
     try:
-        response = await llm.ainvoke(extraction_prompt)
+        response = await with_retry(max_retries=2)(llm.ainvoke)(extraction_prompt)
         parsed = parse_json(response.content)
-    except Exception:
+        logger.debug("Extraction parsed: %d operations", len(parsed.get("memory", [])))
+    except Exception as exc:
+        logger.warning("Memory extraction LLM failed after retries: %s", exc)
         return {"turn_count": turn_count}
 
     operations = parsed.get("memory", [])
@@ -195,41 +211,84 @@ async def memory_pipeline(state: AgentState, config: RunnableConfig) -> dict:
     deleted_count = 0
     skipped_count = 0
     fact_log = []
+    use_structured = configurable.structured_extraction
 
     for op in operations:
         event = op.get("event", "ADD").upper()
         text = op.get("text", "").strip()
         op_id = op.get("id", "")
 
-        if event == "ADD" and text:
-            entry_id = await asyncio.to_thread(
-                put_to_archival,
-                text,
-                "conversation_facts",
-                {"source": "conversation", "turn": turn_count},
-            )
-            stored_count += 1
-            fact_log.append({"fact": text, "action": "stored", "entry_id": entry_id})
+        # Build metadata with optional structured fields
+        def _build_meta(source: str, extra: dict | None = None) -> dict:
+            meta = {"source": source, "turn": turn_count}
+            if extra:
+                meta.update(extra)
+            if use_structured:
+                entities = op.get("entities")
+                if entities:
+                    meta["entities"] = entities
+                temporal = op.get("temporal")
+                if temporal and temporal.get("reference"):
+                    meta["temporal"] = temporal
+            return meta
 
-        elif event == "UPDATE" and text and op_id:
-            old_memory = op.get("old_memory", "")
-            await asyncio.to_thread(
-                update_archival,
-                op_id,
-                text,
-                {"source": "memory_pipeline", "old_memory": old_memory[:80]},
-            )
-            updated_count += 1
-            fact_log.append({"fact": text, "action": "updated", "existing_id": op_id})
+        try:
+            if event == "ADD" and text:
+                entry_id = await asyncio.to_thread(
+                    put_to_archival,
+                    text,
+                    "conversation_facts",
+                    _build_meta("conversation"),
+                )
+                stored_count += 1
+                fact_log.append({"fact": text, "action": "stored", "entry_id": entry_id})
 
-        elif event == "DELETE" and op_id:
-            await asyncio.to_thread(delete_archival, op_id)
-            deleted_count += 1
-            fact_log.append({"fact": op.get("old_memory", ""), "action": "deleted", "entry_id": op_id})
+            elif event == "UPDATE" and text and op_id:
+                old_memory = op.get("old_memory", "")
+                await asyncio.to_thread(
+                    update_archival,
+                    op_id,
+                    text,
+                    _build_meta("memory_pipeline", {"old_memory": old_memory[:80]}),
+                )
+                updated_count += 1
+                fact_log.append({"fact": text, "action": "updated", "existing_id": op_id})
 
-        else:
+            elif event == "DELETE" and op_id:
+                await asyncio.to_thread(delete_archival, op_id)
+                deleted_count += 1
+                fact_log.append({"fact": op.get("old_memory", ""), "action": "deleted", "entry_id": op_id})
+
+            else:
+                skipped_count += 1
+                fact_log.append({"fact": text, "action": "skipped", "reason": f"event:{event}"})
+        except Exception as exc:
+            logger.error("Failed to execute memory op %s: %s", event, exc)
             skipped_count += 1
-            fact_log.append({"fact": text, "action": "skipped", "reason": f"event:{event}"})
+            fact_log.append({"fact": text, "action": "error", "reason": str(exc)})
+
+    logger.info(
+        "Pipeline turn %d: stored=%d updated=%d deleted=%d skipped=%d from %d ops",
+        turn_count, stored_count, updated_count, deleted_count, skipped_count, len(operations),
+    )
+
+    # Step 6: Calculate importance scores for new/updated entries
+    importance_scores = []
+    for entry in fact_log:
+        entry_id = entry.get("entry_id") or entry.get("existing_id")
+        if not entry_id or entry.get("action") not in ("stored", "updated"):
+            continue
+        try:
+            score = calculate_importance(
+                content=entry.get("fact", ""),
+                metadata={"source": "conversation", "turn": turn_count},
+                access_count=0,
+                created_at=datetime.now(timezone.utc).isoformat(),
+            )
+            await asyncio.to_thread(update_importance_score, entry_id, score)
+            importance_scores.append({"entry_id": entry_id, "importance": round(score, 4)})
+        except Exception:
+            pass  # Non-critical: don't fail the pipeline over scoring
 
     result = {
         "turn_count": turn_count,
@@ -242,6 +301,7 @@ async def memory_pipeline(state: AgentState, config: RunnableConfig) -> dict:
             "deleted": deleted_count,
             "skipped": skipped_count,
             "existing_memories": len(existing),
+            "importance_scores": importance_scores,
             "turn_count": turn_count,
             "timestamp": datetime.now(timezone.utc).isoformat(),
         }],
@@ -294,8 +354,7 @@ async def _resolve_conflicts(
                 score=f"{best_score:.2f}",
             )
             try:
-                response = await llm.ainvoke(prompt)
-                from agent.utils import parse_json
+                response = await with_retry(max_retries=2)(llm.ainvoke)(prompt)
                 decision = parse_json(response.content)
                 confidence = float(decision.get("confidence", 0.5))
 
@@ -325,8 +384,8 @@ async def _resolve_conflicts(
                         llm_confidence=confidence,
                     )
                     op = {**op, "event": "NOOP", "reason": "queued_for_review", "confidence": confidence}
-            except Exception:
-                pass  # Keep original ADD if conflict resolution fails
+            except Exception as exc:
+                logger.warning("Conflict resolution LLM failed, keeping original ADD: %s", exc)
 
         resolved.append(op)
 
@@ -340,7 +399,11 @@ async def _consolidate_namespace(
     max_entries: int = 500,
 ) -> dict:
     """Dedup and merge similar entries in a namespace via embedding clustering."""
-    facts = await asyncio.to_thread(get_all_facts, namespace, max_entries)
+    try:
+        facts = await asyncio.to_thread(get_all_facts, namespace, max_entries)
+    except Exception as exc:
+        logger.error("get_all_facts failed for namespace %s: %s", namespace, exc)
+        return {"namespace": namespace, "action": "skipped", "reason": "fetch_error"}
 
     if len(facts) < 2:
         return {"namespace": namespace, "action": "skipped", "reason": "too_few", "count": len(facts)}
@@ -399,22 +462,47 @@ async def _consolidate_namespace(
             entries="\n".join(f"- {f}" for f in cluster_facts)
         )
         try:
-            response = await llm.ainvoke(merge_prompt)
+            response = await with_retry(max_retries=2)(llm.ainvoke)(merge_prompt)
             merged_text = response.content.strip()
-        except Exception:
+        except Exception as exc:
+            logger.warning("Consolidation merge LLM failed for cluster, using longest: %s", exc)
             merged_text = max(cluster_facts, key=len)
 
+        # Touch access on entries being merged, then delete
         for cid in cluster_ids:
-            await asyncio.to_thread(delete_archival, cid)
-            deleted_count += 1
+            try:
+                await asyncio.to_thread(touch_memory_access, cid)
+                await asyncio.to_thread(delete_archival, cid)
+                deleted_count += 1
+            except Exception as exc:
+                logger.error("Failed to delete archival entry %s during consolidation: %s", cid, exc)
 
-        await asyncio.to_thread(
-            put_to_archival,
-            merged_text,
-            "conversation_facts",
-            {"source": "consolidation", "merged_from": cluster_ids, "original_count": len(members)},
-        )
-        merged_count += 1
+        try:
+            merged_id = await asyncio.to_thread(
+                put_to_archival,
+                merged_text,
+                "conversation_facts",
+                {"source": "consolidation", "merged_from": cluster_ids, "original_count": len(members)},
+            )
+
+            # Set importance for merged entry (boosted slightly since it consolidates knowledge)
+            try:
+                merged_score = calculate_importance(
+                    content=merged_text,
+                    metadata={"source": "consolidation"},
+                    access_count=0,
+                    created_at=datetime.now(timezone.utc).isoformat(),
+                )
+                merged_score = min(1.0, merged_score * 1.1)
+                await asyncio.to_thread(update_importance_score, merged_id, merged_score)
+            except Exception:
+                pass  # Non-critical
+
+            merged_count += 1
+        except Exception as exc:
+            logger.error("Failed to store consolidated entry: %s", exc)
+
+    logger.info("Consolidated %s: %d total, %d merged, %d deleted", namespace, len(facts), merged_count, deleted_count)
 
     return {
         "namespace": namespace,
@@ -445,34 +533,40 @@ async def consolidate_memory(state: AgentState, config: RunnableConfig) -> dict:
     )
     ops.append({"type": "consolidate", **result, "timestamp": t0.isoformat()})
 
-    # 3. ingested: cleanup old + excess (no merge — preserve original chunks)
+    # 3. ingested: cleanup old + excess (no merge -- preserve original chunks)
     cleanup_days = configurable.archival_cleanup_days
     max_entries = configurable.archival_max_entries
 
-    cleaned = await asyncio.to_thread(cleanup_namespace, "ingested", cleanup_days)
-    excess = await asyncio.to_thread(cleanup_excess, "ingested", max_entries)
-    if cleaned or excess:
-        ops.append({
-            "type": "cleanup",
-            "namespace": "ingested",
-            "expired_deleted": cleaned,
-            "excess_deleted": excess,
-            "timestamp": t0.isoformat(),
-        })
+    try:
+        cleaned = await asyncio.to_thread(cleanup_namespace, "ingested", cleanup_days)
+        excess = await asyncio.to_thread(cleanup_excess, "ingested", max_entries)
+        if cleaned or excess:
+            ops.append({
+                "type": "cleanup",
+                "namespace": "ingested",
+                "expired_deleted": cleaned,
+                "excess_deleted": excess,
+                "timestamp": t0.isoformat(),
+            })
+    except Exception as exc:
+        logger.error("Ingested cleanup failed: %s", exc)
 
     # 4. recall memory: cleanup old + excess per thread
     thread_id = state.get("thread_id", "default")
-    recall_cleaned, recall_excess = await asyncio.to_thread(
-        cleanup_recall, thread_id, cleanup_days, 500,
-    )
-    if recall_cleaned or recall_excess:
-        ops.append({
-            "type": "cleanup",
-            "namespace": "recall_memory",
-            "expired_deleted": recall_cleaned,
-            "excess_deleted": recall_excess,
-            "thread_id": thread_id,
-            "timestamp": t0.isoformat(),
-        })
+    try:
+        recall_cleaned, recall_excess = await asyncio.to_thread(
+            cleanup_recall, thread_id, cleanup_days, 500,
+        )
+        if recall_cleaned or recall_excess:
+            ops.append({
+                "type": "cleanup",
+                "namespace": "recall_memory",
+                "expired_deleted": recall_cleaned,
+                "excess_deleted": recall_excess,
+                "thread_id": thread_id,
+                "timestamp": t0.isoformat(),
+            })
+    except Exception as exc:
+        logger.error("Recall cleanup failed: %s", exc)
 
     return {"memory_operations": ops}

@@ -199,13 +199,16 @@ Assistant: {assistant_message}
 - Each memory text must be a self-contained factual statement (one sentence, include specific names/dates/numbers).
 - Preserve the user's original phrasing where possible.
 - Do NOT extract greetings, opinions, emotions, or general knowledge.
+- For each memory, also extract:
+  - "entities": list of {{"name": "...", "type": "person|place|org|event|date|project"}}
+  - "temporal": {{"reference": "original time expression", "absolute": "YYYY-MM-DD or null if not a specific date"}}
 - If no memory-worthy information, return {{"memory": []}}.
 
 Respond with ONLY a JSON object:
 {{"memory": [
-  {{"id": "new_0", "text": "...", "event": "ADD"}},
-  {{"id": "existing_id_here", "text": "updated text...", "event": "UPDATE", "old_memory": "original text..."}},
-  {{"id": "existing_id_here", "text": "", "event": "DELETE"}}
+  {{"id": "new_0", "text": "...", "event": "ADD", "entities": [{{"name": "...", "type": "person"}}], "temporal": {{"reference": "Monday", "absolute": "2026-05-25"}}}},
+  {{"id": "existing_id_here", "text": "updated text...", "event": "UPDATE", "old_memory": "original text...", "entities": [], "temporal": {{"reference": "", "absolute": null}}}},
+  {{"id": "existing_id_here", "text": "", "event": "DELETE", "entities": [], "temporal": {{"reference": "", "absolute": null}}}}
 ]}}
 """
 
@@ -249,4 +252,18 @@ Conversation history:
 Latest message: {latest_message}
 
 Respond with ONLY the rewritten query (no JSON, no explanation).
+"""
+
+CHUNK_ENRICHMENT_PROMPT = """Extract structured metadata from this text chunk for improved retrieval.
+
+Text:
+{chunk_text}
+
+Extract:
+1. "summary": A 1-sentence summary of the key content
+2. "entities": List of {{"name": "...", "type": "person|place|org|event|date|project"}} entities mentioned
+3. "keywords": 3-5 search keywords
+
+Respond with ONLY a JSON object:
+{{"summary": "...", "entities": [{{"name": "...", "type": "..."}}], "keywords": ["kw1", "kw2", ...]}}
 """

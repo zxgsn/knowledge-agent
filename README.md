@@ -69,7 +69,7 @@ User + Assistant messages
 |---|---|
 | Agent Framework | LangGraph StateGraph |
 | LLM | Any OpenAI-compatible API |
-| Embedding | DashScope `text-embedding-v3` (1024-dim, with LRU cache) |
+| Embedding | BAAI/bge-m3 (1024-dim, local sentence-transformers, with LRU cache) |
 | Vector Store | PostgreSQL 16 + pgvector |
 | Full-Text Search | PostgreSQL tsvector + GIN |
 | Re-ranking | BAAI/bge-reranker-v2-m3 (cross-encoder) |
@@ -103,15 +103,14 @@ LLM_API_KEY=your-api-key
 LLM_BASE_URL=https://api.openai.com/v1
 LLM_MODEL=gpt-4o-mini
 
-# Embedding (DashScope)
-DASHSCOPE_API_KEY=your-dashscope-key
-DASHSCOPE_EMBEDDING_MODEL=text-embedding-v3
+# Embedding (local BAAI/bge-m3, auto-downloaded on first use)
+EMBEDDING_MODEL=BAAI/bge-m3
 
 # Web Search (Tavily)
 TAVILY_API_KEY=your-tavily-key
 
-# PostgreSQL
-DATABASE_URL=postgresql://knowledge_agent:knowledge_agent@localhost:5432/knowledge_agent
+# PostgreSQL (port 7432 maps to container 5432)
+DATABASE_URL=postgresql://knowledge_agent:knowledge_agent@localhost:7432/knowledge_agent
 
 # LangSmith (optional)
 LANGSMITH_API_KEY=your-langsmith-key
@@ -181,7 +180,7 @@ knowledge-agent/
 │   │   │   ├── core_memory.py        # CoreMemory + undo history
 │   │   │   └── tools.py              # Memory edit + archival tools
 │   │   ├── storage/
-│   │   │   ├── embedding.py          # DashScope embedding + LRU cache
+│   │   │   ├── embedding.py          # BGE-M3 local embedding + LRU cache
 │   │   │   ├── reranker.py           # Cross-encoder re-ranking
 │   │   │   └── ingestion.py          # Document ingestion pipeline
 │   │   └── nodes/
@@ -193,8 +192,17 @@ knowledge-agent/
 │   │   ├── test_recall.py
 │   │   ├── test_locomo.py
 │   │   └── manage_archival.py
-│   ├── tests/                        # 174 unit tests
-│   └── examples/cli_chat.py
+│   ├── tests/                        # 198 unit tests
+│   ├── examples/cli_chat.py
+│   ├── config.yaml                   # Feature flags and tuning
+│   └── docker-compose.yml            # PostgreSQL + pgvector
+docs/                                  # Project documentation
+├── architecture/                      # System overview, graph flow, data model
+├── design-decisions/                  # ADRs (memory, HyDE, selective capture, reranker, MMR)
+├── modules/                           # Module-level documentation
+├── api/                               # REST API reference
+├── deployment/                        # Setup guide
+└── roadmap.md                         # Future extensibility plan
 └── frontend/src/
     ├── App.tsx
     └── components/
@@ -202,6 +210,7 @@ knowledge-agent/
 
 ## Roadmap
 
+- **Temporal query support** — Improve retrieval for time-sensitive questions ("what happened on Monday", "last week's discussion"). Approaches: temporal metadata extraction during ingestion, time-aware query expansion, and date-range filtering on archival search.
 - **Edit support for all namespaces** — Currently only `manual` entries can be edited from the Document Library UI. Extend inline edit to `ingested`, `research`, and other archival namespaces.
 - **Version diff view** — Side-by-side comparison between two archival versions, highlighting added/removed/changed text for easier review.
 - **Bulk conflict resolution** — Allow approving or rejecting multiple pending conflict reviews at once, with a batch action UI.

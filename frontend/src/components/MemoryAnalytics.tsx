@@ -3,11 +3,22 @@ import { Link } from "react-router-dom";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
-import { ArrowLeft, BarChart3, Database, MessageSquare, FileText, AlertTriangle, History } from "lucide-react";
+import { ArrowLeft, BarChart3, Database, MessageSquare, FileText, History, Search, TrendingUp, Zap } from "lucide-react";
 
 const API_BASE = import.meta.env.DEV
   ? "http://localhost:8000"
   : "";
+
+interface ImportanceBucket {
+  range: string;
+  count: number;
+}
+
+interface TopEntity {
+  name: string;
+  type: string;
+  mention_count: number;
+}
 
 interface AnalyticsStats {
   archival_count: number;
@@ -29,11 +40,20 @@ export function MemoryAnalytics() {
   const [stats, setStats] = useState<AnalyticsStats | null>(null);
   const [loading, setLoading] = useState(true);
 
+  const [importanceData, setImportanceData] = useState<ImportanceBucket[]>([]);
+  const [topEntities, setTopEntities] = useState<TopEntity[]>([]);
+
   const fetchStats = useCallback(async () => {
     setLoading(true);
     try {
-      const res = await fetch(`${API_BASE}/api/analytics/stats`);
-      if (res.ok) setStats(await res.json());
+      const [statsRes, importanceRes, entitiesRes] = await Promise.all([
+        fetch(`${API_BASE}/api/analytics/stats`),
+        fetch(`${API_BASE}/api/analytics/importance-distribution`),
+        fetch(`${API_BASE}/api/analytics/top-entities?limit=10`),
+      ]);
+      if (statsRes.ok) setStats(await statsRes.json());
+      if (importanceRes.ok) setImportanceData(await importanceRes.json());
+      if (entitiesRes.ok) setTopEntities(await entitiesRes.json());
     } catch (err) {
       console.error("Failed to fetch analytics:", err);
     }
@@ -126,6 +146,88 @@ export function MemoryAnalytics() {
             </CardContent>
           </Card>
         </div>
+
+        {/* Quick Search Link */}
+        <Card className="bg-neutral-700 border-neutral-600">
+          <CardContent className="p-4">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-3">
+                <div className="w-10 h-10 rounded-lg bg-sky-600/20 flex items-center justify-center">
+                  <Search className="w-5 h-5 text-sky-400" />
+                </div>
+                <div>
+                  <h2 className="text-sm font-medium text-neutral-200">Quick Memory Search</h2>
+                  <p className="text-xs text-neutral-500">Search across all archival memories with semantic matching</p>
+                </div>
+              </div>
+              <Link to="/memory-search">
+                <Button variant="outline" className="border-sky-600 text-sky-400 hover:bg-sky-600/20 hover:text-sky-300">
+                  <Search className="w-4 h-4 mr-1" />
+                  Search
+                </Button>
+              </Link>
+            </div>
+          </CardContent>
+        </Card>
+
+        {/* Importance Distribution */}
+        {importanceData.length > 0 && (
+          <Card className="bg-neutral-700 border-neutral-600">
+            <CardContent className="p-4">
+              <div className="flex items-center gap-2 mb-3">
+                <Zap className="w-4 h-4 text-amber-400" />
+                <h2 className="text-sm font-medium text-neutral-200">Importance Distribution</h2>
+              </div>
+              <div className="space-y-2">
+                {importanceData.map((bucket) => {
+                  const maxCount = Math.max(...importanceData.map((b) => b.count), 1);
+                  const pct = (bucket.count / maxCount) * 100;
+                  return (
+                    <div key={bucket.range} className="flex items-center gap-3">
+                      <span className="text-xs text-neutral-400 w-20 text-right">{bucket.range}</span>
+                      <div className="flex-1 bg-neutral-800 rounded-full h-3">
+                        <div
+                          className="h-3 rounded-full transition-all duration-500 bg-gradient-to-r from-amber-600 to-amber-400"
+                          style={{ width: `${pct}%` }}
+                        />
+                      </div>
+                      <span className="text-xs text-neutral-500 w-10 text-right">{bucket.count}</span>
+                    </div>
+                  );
+                })}
+              </div>
+            </CardContent>
+          </Card>
+        )}
+
+        {/* Top Entities */}
+        {topEntities.length > 0 && (
+          <Card className="bg-neutral-700 border-neutral-600">
+            <CardContent className="p-4">
+              <div className="flex items-center gap-2 mb-3">
+                <TrendingUp className="w-4 h-4 text-emerald-400" />
+                <h2 className="text-sm font-medium text-neutral-200">Top Entities</h2>
+              </div>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                {topEntities.map((entity, i) => (
+                  <div
+                    key={`${entity.name}-${i}`}
+                    className="flex items-center gap-3 p-2 rounded-lg bg-neutral-800/60 hover:bg-neutral-800 transition-colors"
+                  >
+                    <span className="text-xs font-mono text-neutral-500 w-5 text-right">{i + 1}</span>
+                    <div className="flex-1 min-w-0">
+                      <div className="text-sm text-neutral-200 truncate">{entity.name}</div>
+                      <div className="text-[10px] text-neutral-500">{entity.type}</div>
+                    </div>
+                    <Badge variant="outline" className="text-[10px] border-neutral-600 text-neutral-400 shrink-0">
+                      {entity.mention_count}
+                    </Badge>
+                  </div>
+                ))}
+              </div>
+            </CardContent>
+          </Card>
+        )}
 
         {/* Namespace Distribution */}
         <Card className="bg-neutral-700 border-neutral-600">

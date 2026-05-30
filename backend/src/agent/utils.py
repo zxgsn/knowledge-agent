@@ -29,11 +29,12 @@ def get_env(key: str, default: str = "") -> str:
     return os.getenv(key, default)
 
 
-def parse_json(text: str) -> dict:
+def parse_json(text: str) -> dict | list:
     """Extract JSON from LLM response, handling markdown code blocks.
 
     Returns an empty dict if the text cannot be parsed as JSON, with a
-    structured warning logged for debugging.
+    structured warning logged for debugging.  May return a list if the
+    LLM responded with a JSON array.
     """
     if not text or not text.strip():
         logger.warning("Empty text passed to parse_json")
@@ -57,11 +58,9 @@ def parse_json(text: str) -> dict:
         return {}
 
     if not isinstance(result, dict):
-        logger.warning(
-            "Parsed JSON is not a dict (type=%s), returning empty dict",
-            type(result).__name__,
-        )
-        return {}
+        # Lists and other JSON types are valid — return as-is for callers
+        # that expect them (e.g. parse_json("[1,2,3]")).
+        return result
 
     return result
 

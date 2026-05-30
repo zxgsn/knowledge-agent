@@ -276,6 +276,93 @@ def chunk_text_semantic(
     return chunks
 
 
+def deduplicate_chunks(chunks: list[Chunk], threshold: float = 0.92) -> list[Chunk]:
+    """Remove near-duplicate chunks before storing.
+
+    Computes embedding similarity between consecutive chunks and drops
+    chunks whose content is too similar (above ``threshold``) to an
+    already-kept chunk.  This prevents storing redundant information
+    when source material has repeated passages.
+
+    Args:
+        chunks: The list of chunks produced by any chunking strategy.
+        threshold: Cosine similarity above which a chunk is considered
+            a duplicate.  Default 0.92.
+
+    Returns:
+        Filtered list with duplicates removed (keeps the first occurrence).
+    """
+    if len(chunks) <= 1:
+        return chunks
+
+    try:
+        from agent.storage import get_embeddings
+
+        embeddings = get_embeddings()
+        vectors = embeddings.embed_documents([c.content[:512] for c in chunks])
+    except Exception:
+        # If embedding fails, return all chunks (graceful degradation)
+        return chunks
+
+    kept: list[Chunk] = []
+    kept_vectors: list[list[float]] = []
+
+    for chunk, vec in zip(chunks, vectors):
+        is_dup = False
+        for kv in kept_vectors:
+            sim = _cosine_similarity(vec, kv)
+            if sim >= threshold:
+                is_dup = True
+                break
+        if not is_dup:
+            kept.append(chunk)
+            kept_vectors.append(vec)
+
+    return kept
+
+
+def chunk_text_dispatch(
+    text: str,
+    strategy: str = "fixed",
+    **kwargs,
+) -> list[Chunk]:
+    """Dispatch to the appropriate chunking strategy.
+
+    Args:
+        text: The text to chunk.
+        strategy: ``"fixed"`` for fixed-size chunking, ``"semantic"`` for
+            embedding-based semantic chunking.
+        **kwargs: Forwarded to the underlying chunking function.
+            For ``"fixed"``: ``chunk_size``, ``chunk_overlap``, ``source``, ``source_type``.
+            For ``"semantic"``: ``similarity_threshold``, ``min_chunk_size``,
+            ``max_chunk_size``, ``chunk_overlap``, ``source``, ``source_type``.
+
+    Returns:
+        List of :class:`Chunk` objects.
+    """
+    source = kwargs.pop("source", "")
+    source_type = kwargs.pop("source_type", "")
+
+    if strategy == "semantic":
+        from agent.storage import get_embeddings
+
+        return chunk_text_semantic(
+            text=text,
+            embeddings=get_embeddings(),
+            source=source,
+            source_type=source_type,
+            **kwargs,
+        )
+
+    # Default: fixed-size
+    return chunk_text(
+        text=text,
+        source=source,
+        source_type=source_type,
+        **kwargs,
+    )
+
+
 async def ingest_text(
     content: str,
     source_name: str,
@@ -381,3 +468,34 @@ async def ingest_url(
             source_type="url",
         )
     return title, chunks
+
+
+async def enrich_chunks(chunks: list[Chunk], llm) -> list[Chunk]:
+    """Enrich chunks with LLM-extracted summary, entities, and keywords.
+
+    Adds metadata fields: summary, entities, keywords.
+    Gracefully skips chunks that fail enrichment.
+    """
+    from agent.prompts import CHUNK_ENRICHMENT_PROMPT
+    from agent.utils import parse_json
+
+    for chunk in chunks:
+        if len(chunk.content.strip()) < 50:
+            continue
+        try:
+            prompt = CHUNK_ENRICHMENT_PROMPT.format(
+                chunk_text=chunk.content[:1500]
+            )
+            response = await llm.ainvoke(prompt)
+            parsed = parse_json(response.content)
+            if parsed:
+                if parsed.get("summary"):
+                    chunk.metadata["summary"] = parsed["summary"]
+                if parsed.get("entities"):
+                    chunk.metadata["entities"] = parsed["entities"]
+                if parsed.get("keywords"):
+                    chunk.metadata["keywords"] = parsed["keywords"]
+        except Exception:
+            pass  # Graceful degradation: keep chunk without enrichment
+
+    return chunks

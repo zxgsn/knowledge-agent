@@ -19,7 +19,7 @@ interface CoreMemoryPanelProps {
 }
 
 const API_URL = import.meta.env.DEV
-  ? "http://localhost:2024"
+  ? "http://localhost:8123"
   : "http://localhost:8123";
 
 const client = new Client({ apiUrl: API_URL });

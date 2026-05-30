@@ -802,3 +802,166 @@ def get_analytics_stats():
         }
 
     return stats
+
+
+# --- Pydantic models for new endpoints ---
+
+
+class ImportanceDistributionItem(BaseModel):
+    range: str
+    count: int
+
+
+class ImportanceDistributionResponse(BaseModel):
+    distribution: list[ImportanceDistributionItem]
+    total_scored: int
+
+
+class EntityInfo(BaseModel):
+    entity: str
+    memory_count: int | None = None
+    count: int | None = None
+    edge_count: int | None = None
+
+
+class TopEntitiesResponse(BaseModel):
+    entities: list[EntityInfo]
+
+
+class KnowledgeGraphNode(BaseModel):
+    id: str
+    memory_count: int
+    hop: int | None = None
+
+
+class KnowledgeGraphEdge(BaseModel):
+    source: str
+    target: str
+    weight: int
+
+
+class KnowledgeGraphResponse(BaseModel):
+    center: str
+    nodes: list[KnowledgeGraphNode]
+    edges: list[KnowledgeGraphEdge]
+
+
+class ImportanceSearchResult(BaseModel):
+    id: str
+    content: str
+    metadata: dict
+    namespace: str
+    score: float
+    cosine_score: float
+    importance_score: float
+
+
+class MemorySearchResponse(BaseModel):
+    results: list[ImportanceSearchResult]
+    query: str
+    namespace: str
+
+
+class SetImportanceRequest(BaseModel):
+    score: float
+
+
+# --- Importance & Knowledge Graph endpoints ---
+
+
+@app.get("/api/analytics/importance-distribution", response_model=ImportanceDistributionResponse)
+def get_importance_distribution():
+    """Get histogram of importance scores across all active memories."""
+    from agent.db.importance import get_memory_stats_extended
+
+    extended = get_memory_stats_extended()
+    distribution = extended.get("importance_distribution", [])
+    total = sum(item["count"] for item in distribution)
+    return ImportanceDistributionResponse(
+        distribution=[ImportanceDistributionItem(**d) for d in distribution],
+        total_scored=total,
+    )
+
+
+@app.get("/api/analytics/knowledge-graph", response_model=KnowledgeGraphResponse)
+def get_knowledge_graph(center: str = Query(default=""), radius: int = Query(default=2, ge=1, le=5)):
+    """Get a subgraph around a center entity for visualization."""
+    from fastapi import HTTPException
+
+    from agent.memory.knowledge_graph import get_knowledge_graph, rebuild_graph_from_db
+
+    graph = get_knowledge_graph()
+    # If graph is empty, try to rebuild
+    if graph.stats["entity_count"] == 0:
+        graph = rebuild_graph_from_db()
+
+    if not center:
+        # Return top entity as center if none specified
+        top = graph.get_top_entities(limit=1)
+        if not top:
+            raise HTTPException(status_code=404, detail="No entities found in knowledge graph")
+        center = top[0]["entity"]
+
+    subgraph = graph.get_subgraph(center, radius)
+    return KnowledgeGraphResponse(
+        center=center,
+        nodes=[KnowledgeGraphNode(**n) for n in subgraph["nodes"]],
+        edges=[KnowledgeGraphEdge(**e) for e in subgraph["edges"]],
+    )
+
+
+@app.get("/api/analytics/top-entities", response_model=TopEntitiesResponse)
+def get_top_entities(limit: int = Query(default=20, ge=1, le=100)):
+    """Get most frequently mentioned entities across all memories.
+
+    Combines entities from both the knowledge graph (content-extracted)
+    and structured metadata (entities field).
+    """
+    from agent.memory.knowledge_graph import get_knowledge_graph, rebuild_graph_from_db
+
+    graph = get_knowledge_graph()
+    if graph.stats["entity_count"] == 0:
+        graph = rebuild_graph_from_db()
+
+    graph_entities = graph.get_top_entities(limit)
+    return TopEntitiesResponse(
+        entities=[EntityInfo(**e) for e in graph_entities]
+    )
+
+
+@app.get("/api/memory/search", response_model=MemorySearchResponse)
+def advanced_memory_search(
+    query: str = Query(...),
+    namespace: str = Query(default=""),
+    limit: int = Query(default=10, ge=1, le=50),
+    importance_weight: float = Query(default=0.3, ge=0.0, le=1.0),
+):
+    """Advanced memory search with importance-weighted results.
+
+    Combines vector similarity with importance scoring for better ranking.
+    """
+    from agent.db.importance import search_importance_weighted
+
+    results = search_importance_weighted(
+        query=query,
+        namespace=namespace,
+        limit=limit,
+        importance_weight=importance_weight,
+    )
+    return MemorySearchResponse(
+        results=[ImportanceSearchResult(**r) for r in results],
+        query=query,
+        namespace=namespace,
+    )
+
+
+@app.post("/api/memory/{entry_id}/importance")
+def set_importance_score(entry_id: str, req: SetImportanceRequest):
+    """Manually set importance score for a memory entry."""
+    from fastapi import HTTPException
+
+    from agent.db.importance import update_importance_score
+
+    score = max(0.0, min(1.0, req.score))
+    update_importance_score(entry_id, score)
+    return {"entry_id": entry_id, "importance_score": score}

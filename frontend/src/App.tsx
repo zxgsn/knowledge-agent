@@ -7,9 +7,14 @@ import { WelcomeScreen } from "@/components/WelcomeScreen";
 import { ChatMessagesView } from "@/components/ChatMessagesView";
 import { DocumentLibrary } from "@/components/DocumentLibrary";
 import { MemoryAnalytics } from "@/components/MemoryAnalytics";
+import { MemorySearchPanel } from "@/components/MemorySearchPanel";
+import { KnowledgeGraphView } from "@/components/KnowledgeGraphView";
 import { CoreMemoryPanel } from "@/components/CoreMemoryPanel";
 import { ThreadSidebar } from "@/components/ThreadSidebar";
 import { Button } from "@/components/ui/button";
+import { NavLink } from "react-router-dom";
+import { cn } from "@/lib/utils";
+import { MessageSquare, BookOpen, BarChart3, Search, Network } from "lucide-react";
 
 export default function App() {
   const [processedEventsTimeline, setProcessedEventsTimeline] = useState<
@@ -31,7 +36,7 @@ export default function App() {
     mode: string;
   }>({
     apiUrl: import.meta.env.DEV
-      ? "http://localhost:2024"
+      ? "http://localhost:8123"
       : "http://localhost:8123",
     assistantId: "agent",
     messagesKey: "messages",
@@ -382,10 +387,86 @@ export default function App() {
   }, []);
 
   return (
-    <div className="flex h-screen bg-neutral-800 text-neutral-100 font-sans antialiased">
+    <div className="flex flex-col h-screen bg-neutral-800 text-neutral-100 font-sans antialiased">
+      {/* Top navigation bar */}
+      <nav className="flex items-center gap-1 px-4 py-2 bg-neutral-900 border-b border-neutral-700 shrink-0">
+        <NavLink
+          to="/"
+          className={({ isActive }) =>
+            cn(
+              "flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium transition-colors",
+              isActive
+                ? "bg-neutral-700 text-neutral-100"
+                : "text-neutral-400 hover:text-neutral-200 hover:bg-neutral-800"
+            )
+          }
+        >
+          <MessageSquare className="w-3.5 h-3.5" />
+          Chat
+        </NavLink>
+        <NavLink
+          to="/library"
+          className={({ isActive }) =>
+            cn(
+              "flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium transition-colors",
+              isActive
+                ? "bg-neutral-700 text-neutral-100"
+                : "text-neutral-400 hover:text-neutral-200 hover:bg-neutral-800"
+            )
+          }
+        >
+          <BookOpen className="w-3.5 h-3.5" />
+          Library
+        </NavLink>
+        <NavLink
+          to="/analytics"
+          className={({ isActive }) =>
+            cn(
+              "flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium transition-colors",
+              isActive
+                ? "bg-neutral-700 text-neutral-100"
+                : "text-neutral-400 hover:text-neutral-200 hover:bg-neutral-800"
+            )
+          }
+        >
+          <BarChart3 className="w-3.5 h-3.5" />
+          Analytics
+        </NavLink>
+        <NavLink
+          to="/memory-search"
+          className={({ isActive }) =>
+            cn(
+              "flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium transition-colors",
+              isActive
+                ? "bg-neutral-700 text-neutral-100"
+                : "text-neutral-400 hover:text-neutral-200 hover:bg-neutral-800"
+            )
+          }
+        >
+          <Search className="w-3.5 h-3.5" />
+          Search
+        </NavLink>
+        <NavLink
+          to="/knowledge-graph"
+          className={({ isActive }) =>
+            cn(
+              "flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium transition-colors",
+              isActive
+                ? "bg-neutral-700 text-neutral-100"
+                : "text-neutral-400 hover:text-neutral-200 hover:bg-neutral-800"
+            )
+          }
+        >
+          <Network className="w-3.5 h-3.5" />
+          Graph
+        </NavLink>
+      </nav>
+
       <Routes>
         <Route path="/library" element={<DocumentLibrary />} />
         <Route path="/analytics" element={<MemoryAnalytics />} />
+        <Route path="/memory-search" element={<MemorySearchPanel />} />
+        <Route path="/knowledge-graph" element={<KnowledgeGraphView />} />
         <Route
           path="*"
           element={

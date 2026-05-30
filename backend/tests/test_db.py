@@ -32,7 +32,7 @@ def _mock_conn_ctx(conn):
 
 
 class TestSearchArchival:
-    @patch("agent.db.get_conn")
+    @patch("agent.db.archival.get_conn")
     @patch("agent.storage.get_embeddings")
     def test_returns_results(self, mock_get_emb, mock_get_conn):
         from agent.db import search_archival
@@ -53,7 +53,7 @@ class TestSearchArchival:
         assert results[0]["score"] == 0.85
         assert results[0]["metadata"] == {"source": "test"}
 
-    @patch("agent.db.get_conn")
+    @patch("agent.db.archival.get_conn")
     @patch("agent.storage.get_embeddings")
     def test_filters_low_scores(self, mock_get_emb, mock_get_conn):
         from agent.db import search_archival
@@ -68,7 +68,7 @@ class TestSearchArchival:
         results = search_archival("test query")
         assert len(results) == 0
 
-    @patch("agent.db.get_conn")
+    @patch("agent.db.archival.get_conn")
     @patch("agent.storage.get_embeddings")
     def test_embedding_failure_returns_empty(self, mock_get_emb, mock_get_conn):
         from agent.db import search_archival
@@ -76,7 +76,7 @@ class TestSearchArchival:
         mock_get_emb.side_effect = RuntimeError("API error")
         assert search_archival("test") == []
 
-    @patch("agent.db.get_conn")
+    @patch("agent.db.archival.get_conn")
     @patch("agent.storage.get_embeddings")
     def test_db_failure_returns_empty(self, mock_get_emb, mock_get_conn):
         from agent.db import search_archival
@@ -87,7 +87,7 @@ class TestSearchArchival:
 
 
 class TestSearchArchivalForDedup:
-    @patch("agent.db.get_conn")
+    @patch("agent.db.archival.get_conn")
     @patch("agent.storage.get_embeddings")
     def test_returns_results_with_id(self, mock_get_emb, mock_get_conn):
         from agent.db import search_archival_for_dedup
@@ -104,7 +104,7 @@ class TestSearchArchivalForDedup:
         assert results[0]["id"] == "id-1"
         assert results[0]["content"] == "fact content"
 
-    @patch("agent.db.get_conn")
+    @patch("agent.db.archival.get_conn")
     @patch("agent.storage.get_embeddings")
     def test_embedding_failure_returns_empty(self, mock_get_emb, mock_get_conn):
         from agent.db import search_archival_for_dedup
@@ -114,7 +114,7 @@ class TestSearchArchivalForDedup:
 
 
 class TestPutToArchival:
-    @patch("agent.db.get_conn")
+    @patch("agent.db.archival.get_conn")
     @patch("agent.storage.get_embeddings")
     def test_returns_entry_id(self, mock_get_emb, mock_get_conn):
         from agent.db import put_to_archival
@@ -129,7 +129,7 @@ class TestPutToArchival:
         conn.execute.assert_called_once()
         conn.commit.assert_called_once()
 
-    @patch("agent.db.get_conn")
+    @patch("agent.db.archival.get_conn")
     @patch("agent.storage.get_embeddings")
     def test_with_document_id(self, mock_get_emb, mock_get_conn):
         from agent.db import put_to_archival
@@ -144,7 +144,7 @@ class TestPutToArchival:
         call_args = conn.execute.call_args
         assert "doc-123" in call_args[0][1]
 
-    @patch("agent.db.get_conn")
+    @patch("agent.db.archival.get_conn")
     @patch("agent.storage.get_embeddings")
     def test_on_conflict_update(self, mock_get_emb, mock_get_conn):
         from agent.db import put_to_archival
@@ -159,8 +159,8 @@ class TestPutToArchival:
 
 
 class TestInsertDocument:
-    @patch("agent.db._ensure_content_hash_column")
-    @patch("agent.db.get_conn")
+    @patch("agent.db.documents._ensure_content_hash_column")
+    @patch("agent.db.documents.get_conn")
     def test_new_document(self, mock_get_conn, mock_ensure_hash):
         from agent.db import insert_document
 
@@ -176,8 +176,8 @@ class TestInsertDocument:
         assert doc_id == "doc-id-123"
         assert is_new is True
 
-    @patch("agent.db._ensure_content_hash_column")
-    @patch("agent.db.get_conn")
+    @patch("agent.db.documents._ensure_content_hash_column")
+    @patch("agent.db.documents.get_conn")
     def test_existing_document(self, mock_get_conn, mock_ensure_hash):
         from agent.db import insert_document
 
@@ -198,7 +198,7 @@ class TestInsertDocument:
 
 
 class TestSaveToRecall:
-    @patch("agent.db.get_conn")
+    @patch("agent.db.recall.get_conn")
     @patch("agent.storage.get_embeddings")
     @patch("agent.storage.ensure_recall_table")
     def test_saves_message(self, mock_ensure, mock_get_emb, mock_get_conn):
@@ -222,7 +222,7 @@ class TestSaveToRecall:
 
 
 class TestSearchRecall:
-    @patch("agent.db.get_conn")
+    @patch("agent.db.recall.get_conn")
     @patch("agent.storage.get_embeddings")
     def test_returns_results(self, mock_get_emb, mock_get_conn):
         from agent.db import search_recall
@@ -242,7 +242,7 @@ class TestSearchRecall:
         assert results[0]["id"] == "r1"
         assert results[0]["role"] == "user"
 
-    @patch("agent.db.get_conn")
+    @patch("agent.db.recall.get_conn")
     @patch("agent.storage.get_embeddings")
     def test_embedding_failure_returns_empty(self, mock_get_emb, mock_get_conn):
         from agent.db import search_recall
@@ -252,7 +252,7 @@ class TestSearchRecall:
 
 
 class TestUpdateArchival:
-    @patch("agent.db.get_conn")
+    @patch("agent.db.archival.get_conn")
     @patch("agent.storage.get_embeddings")
     def test_executes_update(self, mock_get_emb, mock_get_conn):
         from agent.db import update_archival
@@ -278,7 +278,7 @@ class TestUpdateArchival:
 
 
 class TestDeleteArchival:
-    @patch("agent.db.get_conn")
+    @patch("agent.db.archival.get_conn")
     def test_returns_true_on_delete(self, mock_get_conn):
         from agent.db import delete_archival
 
@@ -296,7 +296,7 @@ class TestDeleteArchival:
 
         assert delete_archival("entry-id") is True
 
-    @patch("agent.db.get_conn")
+    @patch("agent.db.archival.get_conn")
     def test_returns_false_when_no_match(self, mock_get_conn):
         from agent.db import delete_archival
 
@@ -315,7 +315,7 @@ class TestDeleteArchival:
 
 
 class TestGetAllFacts:
-    @patch("agent.db.get_conn")
+    @patch("agent.db.archival.get_conn")
     def test_returns_facts(self, mock_get_conn):
         from agent.db import get_all_facts
 
@@ -330,7 +330,7 @@ class TestGetAllFacts:
         assert results[0]["content"] == "fact text"
         assert results[0]["embedding_text"] == "[0.1, 0.2]"
 
-    @patch("agent.db.get_conn")
+    @patch("agent.db.archival.get_conn")
     def test_db_failure_returns_empty(self, mock_get_conn):
         from agent.db import get_all_facts
 
@@ -339,7 +339,7 @@ class TestGetAllFacts:
 
 
 class TestCleanupNamespace:
-    @patch("agent.db.get_conn")
+    @patch("agent.db.archival.get_conn")
     def test_returns_deleted_count(self, mock_get_conn):
         from agent.db import cleanup_namespace
 
@@ -349,7 +349,7 @@ class TestCleanupNamespace:
 
         assert cleanup_namespace("ingested", 30) == 5
 
-    @patch("agent.db.get_conn")
+    @patch("agent.db.archival.get_conn")
     def test_failure_returns_zero(self, mock_get_conn):
         from agent.db import cleanup_namespace
 
@@ -358,7 +358,7 @@ class TestCleanupNamespace:
 
 
 class TestCleanupExcess:
-    @patch("agent.db.get_conn")
+    @patch("agent.db.archival.get_conn")
     def test_under_limit_returns_zero(self, mock_get_conn):
         from agent.db import cleanup_excess
 
@@ -371,7 +371,7 @@ class TestCleanupExcess:
 
         assert cleanup_excess("ns", 100) == 0
 
-    @patch("agent.db.get_conn")
+    @patch("agent.db.archival.get_conn")
     def test_over_limit_deletes_excess(self, mock_get_conn):
         from agent.db import cleanup_excess
 
@@ -399,7 +399,7 @@ class TestCleanupExcess:
         result = cleanup_excess("ns", 100)
         assert result == 50
 
-    @patch("agent.db.get_conn")
+    @patch("agent.db.archival.get_conn")
     def test_failure_returns_zero(self, mock_get_conn):
         from agent.db import cleanup_excess
 

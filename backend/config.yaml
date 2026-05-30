@@ -1,0 +1,29 @@
+# Knowledge Agent - Feature Configuration
+# Environment variables (uppercase) take precedence over these settings.
+# Uncomment and modify values to override defaults.
+
+features:
+  # --- Search Optimization ---
+  hyde_enabled: true
+  memory_query_rewrite_enabled: true
+  mmr_enabled: true
+  mmr_lambda: 0.7
+  rerank_enabled: true
+
+  # --- Memory Pipeline ---
+  proactive_memory_enabled: true
+  proactive_memory_turns: 3
+  memory_selective_enabled: true
+  memory_consolidation_interval: 10
+
+  # --- Structured Extraction (Solution 2) ---
+  # Extract entities and temporal references from conversation facts
+  structured_extraction: true
+
+  # --- Document Enrichment (Solution 3) ---
+  # LLM-assisted extraction of summary/entities/keywords during ingestion
+  document_enrichment: true
+
+  # --- Archival ---
+  # archival_cleanup_days: 30
+  # archival_max_entries: 1000

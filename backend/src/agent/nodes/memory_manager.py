@@ -19,11 +19,17 @@ from agent.db import (
     put_to_archival,
     save_to_recall,
     search_archival,
+    search_by_entity,
+    search_by_temporal,
     search_recall,
 )
+from agent.logger import get_logger
 from agent.prompts import ARCHIVAL_STORE_PROMPT, EVALUATE_RECALL_PROMPT, ROUTE_INTENT_PROMPT
+from agent.retry import with_retry
 from agent.state import AgentState
 from agent.utils import get_llm, parse_json
+
+logger = get_logger(__name__)
 
 
 async def route_intent(state: AgentState, config: RunnableConfig) -> dict:
@@ -46,13 +52,17 @@ async def route_intent(state: AgentState, config: RunnableConfig) -> dict:
         return {"mode": "chat"}
 
     prompt = ROUTE_INTENT_PROMPT.format(user_message=user_msg)
-    response = await llm.ainvoke(prompt)
-    parsed = parse_json(response.content)
-    mode = parsed.get("mode", "chat")
-    if mode not in ("chat", "research", "memory_edit", "ingest", "recall"):
+    try:
+        response = await with_retry(max_retries=2)(llm.ainvoke)(prompt)
+        parsed = parse_json(response.content)
+        mode = parsed.get("mode", "chat")
+        if mode not in ("chat", "research", "memory_edit", "ingest", "recall"):
+            mode = "chat"
+        need_recall = parsed.get("need_recall", False)
+    except Exception as exc:
+        logger.warning("Intent routing LLM failed, defaulting to chat: %s", exc)
         mode = "chat"
-
-    need_recall = parsed.get("need_recall", False)
+        need_recall = False
 
     return {"mode": mode, "need_recall": need_recall}
 
@@ -75,10 +85,14 @@ async def _rewrite_query(user_msg: str, messages: list, config: Configuration) -
     )
     try:
         llm = get_llm(config, temperature=0.0)
-        response = await llm.ainvoke(prompt)
+        response = await with_retry(max_retries=2)(llm.ainvoke)(prompt)
         rewritten = response.content.strip().strip('"')
-        return rewritten if rewritten else user_msg
-    except Exception:
+        if rewritten:
+            logger.debug("Query rewritten: %s -> %s", user_msg[:60], rewritten[:60])
+            return rewritten
+        return user_msg
+    except Exception as exc:
+        logger.warning("Query rewrite LLM failed, using original: %s", exc)
         return user_msg
 
 
@@ -92,10 +106,42 @@ async def _generate_hypothetical(query: str, config: Configuration) -> str:
     )
     try:
         llm = get_llm(config, temperature=0.7)
-        response = await llm.ainvoke(hyde_prompt)
-        return response.content.strip()
-    except Exception:
+        response = await with_retry(max_retries=2)(llm.ainvoke)(hyde_prompt)
+        result = response.content.strip()
+        logger.debug("HyDE generated: %s", result[:80])
+        return result
+    except Exception as exc:
+        logger.warning("HyDE LLM failed, using original query: %s", exc)
         return query
+
+
+_TEMPORAL_KEYWORDS = re.compile(
+    r"\b(monday|tuesday|wednesday|thursday|friday|saturday|sunday|"
+    r"yesterday|today|tomorrow|last\s+week|next\s+week|"
+    r"last\s+month|next\s+month|last\s+year|next\s+year|"
+    r"mon|tue|wed|thu|fri|sat|sun|"
+    r"\u4e0a\u5468|\u4e0b\u5468|\u6628\u5929|\u4eca\u5929|\u660e\u5929|\u4e0a\u4e2a\u6708|\u4e0b\u4e2a\u6708|\u53bb\u5e74|\u660e\u5e74|"
+    r"\u5468\u4e00|\u5468\u4e8c|\u5468\u4e09|\u5468\u56db|\u5468\u4e94|\u5468\u516d|\u5468\u65e5)\b",
+    re.IGNORECASE,
+)
+
+
+def _detect_temporal_ref(query: str) -> str | None:
+    """Extract a temporal reference keyword from the query, if any."""
+    m = _TEMPORAL_KEYWORDS.search(query)
+    return m.group(0).lower() if m else None
+
+
+def _detect_entities(query: str, archival_results: list[dict]) -> list[str]:
+    """Extract entity names from archival result metadata that also appear in the query."""
+    entities = []
+    query_lower = query.lower()
+    for r in archival_results:
+        for ent in r.get("metadata", {}).get("entities", []):
+            name = ent.get("name", "")
+            if name and name.lower() in query_lower and name not in entities:
+                entities.append(name)
+    return entities
 
 
 async def recall_memory(state: AgentState, config: RunnableConfig) -> dict:
@@ -158,7 +204,7 @@ async def recall_memory(state: AgentState, config: RunnableConfig) -> dict:
     if configurable.memory_query_rewrite_enabled:
         search_query = await _rewrite_query(user_msg, state["messages"], configurable)
 
-    # Step 2: HyDE (if enabled) — generate hypothetical answer for embedding
+    # Step 2: HyDE (if enabled) -- generate hypothetical answer for embedding
     dispatch_custom_event("progress", {"stage": "memory_search", "detail": "Generating search embedding..."}, config=config)
     search_query_for_embed = search_query
     if configurable.hyde_enabled:
@@ -177,12 +223,27 @@ async def recall_memory(state: AgentState, config: RunnableConfig) -> dict:
         archival_task, recall_task
     )
 
+    # Step 3b: Temporal/entity-aware supplementary search
+    temporal_ref = _detect_temporal_ref(search_query)
+    if temporal_ref and configurable.structured_extraction:
+        temporal_results = await asyncio.to_thread(
+            search_by_temporal, temporal_ref, "conversation_facts", 5
+        )
+        # Merge temporal results (avoid duplicates by id)
+        existing_ids = {r.get("id") for r in archival_results_raw}
+        for tr in temporal_results:
+            if tr["id"] not in existing_ids:
+                archival_results_raw.append({
+                    "content": tr["content"],
+                    "metadata": tr.get("metadata", {}),
+                    "score": 0.6,  # moderate score for metadata match
+                })
+
     # Save user message to recall AFTER searching to avoid matching itself
     try:
         await asyncio.to_thread(save_to_recall, "user", user_msg, thread_id=thread_id)
-    except Exception as e:
-        import sys
-        print(f"[memory_manager] Failed to save to recall: {e}", file=sys.stderr)
+    except Exception as exc:
+        logger.warning("Failed to save to recall: %s", exc)
 
     # Log memory operation
     memory_ops = [{
@@ -190,6 +251,7 @@ async def recall_memory(state: AgentState, config: RunnableConfig) -> dict:
         "query": user_msg[:100] + "..." if len(user_msg) > 100 else user_msg,
         "archival_count": len(archival_results_raw),
         "recall_count": len(recall_results_raw),
+        "temporal_boost": temporal_ref is not None,
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }]
 
@@ -197,12 +259,12 @@ async def recall_memory(state: AgentState, config: RunnableConfig) -> dict:
         "archival_results": [
             {
                 "content": r["content"],
-                "source": r["metadata"].get("source", ""),
-                "source_type": r["metadata"].get("source_type", ""),
-                "document": r["metadata"].get("document", ""),
+                "source": r.get("metadata", {}).get("source", ""),
+                "source_type": r.get("metadata", {}).get("source_type", ""),
+                "document": r.get("metadata", {}).get("document", ""),
                 "namespace": r.get("namespace", ""),
-                "timestamp": r["metadata"].get("timestamp", ""),
-                "score": r["score"],
+                "timestamp": r.get("metadata", {}).get("timestamp", ""),
+                "score": r.get("score", 0),
             }
             for r in archival_results_raw
         ],
@@ -211,7 +273,7 @@ async def recall_memory(state: AgentState, config: RunnableConfig) -> dict:
                 "content": r["content"],
                 "role": r.get("role", ""),
                 "thread_id": r.get("thread_id", ""),
-                "score": r["score"],
+                "score": r.get("score", 0),
             }
             for r in recall_results_raw
         ],
@@ -237,7 +299,7 @@ async def evaluate_recall(state: AgentState, config: RunnableConfig) -> dict:
     archival_results = state.get("archival_results", [])
     recall_results = state.get("recall_results", [])
 
-    # No memory results at all — insufficient
+    # No memory results at all -- insufficient
     if not archival_results and not recall_results:
         memory_ops = [{
             "type": "evaluate",
@@ -247,7 +309,7 @@ async def evaluate_recall(state: AgentState, config: RunnableConfig) -> dict:
         }]
         return {"memory_sufficient": False, "memory_evaluation": "No relevant memories found.", "memory_operations": memory_ops}
 
-    # Format memory content for evaluation — include both sources
+    # Format memory content for evaluation -- include both sources
     memory_parts = []
     for r in archival_results:
         memory_parts.append(
@@ -260,7 +322,7 @@ async def evaluate_recall(state: AgentState, config: RunnableConfig) -> dict:
         )
     memory_content = "\n".join(memory_parts)
 
-    # Ask LLM to evaluate
+    # Ask LLM to evaluate (with retry)
     dispatch_custom_event("progress", {"stage": "evaluate_recall", "detail": "Evaluating memory relevance..."}, config=config)
     llm = get_llm(configurable, temperature=0)
 
@@ -270,11 +332,14 @@ async def evaluate_recall(state: AgentState, config: RunnableConfig) -> dict:
     )
 
     try:
-        response = await llm.ainvoke(prompt)
+        response = await with_retry(max_retries=2)(llm.ainvoke)(prompt)
         parsed = parse_json(response.content)
         is_sufficient = parsed.get("is_sufficient", False)
         reason = parsed.get("reason", "Evaluation completed.")
-    except Exception:
+        logger.debug("Recall evaluation: sufficient=%s reason=%s", is_sufficient, reason[:80])
+    except Exception as exc:
+        # Safe fallback: assume memory is insufficient so research is triggered
+        logger.warning("Recall evaluation LLM failed, assuming insufficient: %s", exc)
         is_sufficient = False
         reason = "Failed to evaluate memory content."
 
@@ -310,7 +375,12 @@ async def save_to_archival(state: AgentState, config: RunnableConfig) -> dict:
         research_topic=research_topic,
         summaries=summaries,
     )
-    response = await llm.ainvoke(prompt)
+
+    try:
+        response = await with_retry(max_retries=2)(llm.ainvoke)(prompt)
+    except Exception as exc:
+        logger.warning("Archival store LLM failed after retries: %s", exc)
+        return {}
 
     try:
         entry_id = await asyncio.to_thread(
@@ -319,12 +389,11 @@ async def save_to_archival(state: AgentState, config: RunnableConfig) -> dict:
             "research",
             {"source": "research_summary", "topic": research_topic},
         )
-    except Exception as e:
-        import sys
-        print(f"[save_to_archival] Failed: {e}", file=sys.stderr)
+    except Exception as exc:
+        logger.error("Failed to store to archival: %s", exc)
         return {}
 
-    # Log memory operation — do NOT return archival_results here,
+    # Log memory operation -- do NOT return archival_results here,
     # as that would overwrite the original memory search results
     # from recall_memory. The research content is already available
     # via web_research_result in state.
@@ -370,7 +439,7 @@ async def ingest_document_node(state: AgentState, config: RunnableConfig) -> dic
 
     Extracts text -> chunks -> embeds -> stores in archival memory.
     If the user also asked a question alongside the document, extracts it
-    into ingest_question so the graph can route through recall → respond.
+    into ingest_question so the graph can route through recall -> respond.
     """
     import base64
     from datetime import datetime, timezone
@@ -445,6 +514,13 @@ async def ingest_document_node(state: AgentState, config: RunnableConfig) -> dic
                 return {"ingest_result": "No text content to ingest."}
             doc_label = "manual_text"
 
+        # Optional: LLM enrichment of chunks
+        if cfg.document_enrichment:
+            dispatch_custom_event("progress", {"stage": "ingest_document", "detail": f"Enriching {len(chunks)} chunks with LLM..."}, config=config)
+            from agent.storage.ingestion import enrich_chunks
+            enrich_llm = get_llm(cfg, temperature=0.0)
+            chunks = await enrich_chunks(chunks, enrich_llm)
+
         dispatch_custom_event("progress", {"stage": "ingest_document", "detail": f"Embedding {len(chunks)} chunks..."}, config=config)
         # Reconstruct full text from chunks for document storage
         full_text = "\n\n".join(c.content for c in chunks)
@@ -462,10 +538,23 @@ async def ingest_document_node(state: AgentState, config: RunnableConfig) -> dic
         if not is_new:
             return {"ingest_result": f"Document '{doc_label}' already exists in the library. Skipping."}
 
-        entries = [
-            {"content": c.content, "metadata": {"source": c.source, "source_type": c.source_type, "chunk_index": c.index, "document": doc_label, "document_id": document_id}}
-            for c in chunks
-        ]
+        entries = []
+        for c in chunks:
+            meta = {
+                "source": c.source,
+                "source_type": c.source_type,
+                "chunk_index": c.index,
+                "document": doc_label,
+                "document_id": document_id,
+            }
+            # Include enriched metadata if available
+            if c.metadata.get("summary"):
+                meta["summary"] = c.metadata["summary"]
+            if c.metadata.get("entities"):
+                meta["entities"] = c.metadata["entities"]
+            if c.metadata.get("keywords"):
+                meta["keywords"] = c.metadata["keywords"]
+            entries.append({"content": c.content, "metadata": meta})
         entry_ids = await asyncio.to_thread(
             put_batch_to_archival, entries, "ingested", document_id
         )
