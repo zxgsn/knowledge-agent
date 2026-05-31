@@ -10,7 +10,7 @@ A personal knowledge agent with persistent memory, built on LangGraph. It can re
 
 - **Three-Tier Memory** — Core Memory (in-context blocks), Archival Memory (pgvector + BM25 hybrid search), Recall Memory (conversation history with semantic search)
 - **Hybrid Retrieval Pipeline** — Vector similarity + BM25 keyword matching + cross-encoder re-ranking (`BAAI/bge-reranker-v2-m3`) + MMR diversity filtering + HyDE (hypothetical answer embedding)
-- **Selective Memory Capture** — mem0-style pipeline: LLM judgment → conflict resolution → structured ADD/UPDATE/DELETE operations, with session context windows
+- **Selective Memory Capture** — mem0-style pipeline: LLM judgment -> conflict resolution -> structured ADD/UPDATE/DELETE operations, with session context windows
 - **Deep Research** — Multi-loop web search with automatic gap analysis and follow-up queries
 - **Document Ingestion** — URL, PDF, or plain text; semantic or fixed-size chunking
 - **Intent Routing** — Chat, Research, Recall, Memory Edit, Ingest modes
@@ -18,6 +18,15 @@ A personal knowledge agent with persistent memory, built on LangGraph. It can re
 - **Proactive Memory** — Pushes relevant memories at conversation start without being asked
 - **Thread Isolation** — Recall memory scoped per session via `thread_id`
 - **Full-Stack UI** — React frontend with streaming, document library, and conversation sidebar
+- **Temporal Query Support** — Time-aware retrieval using temporal metadata extraction, date-range filtering, and absolute date indexing
+- **Version History & Rollback** — Snapshot-before-mutate pattern across all three memory tiers (Archival, Recall, Core Memory) with diff view and one-click restore
+- **Bulk Conflict Resolution** — Batch approve or reject multiple pending conflict reviews at once
+- **Memory Analytics Dashboard** — Visualization of importance distribution, top entities, namespace breakdown, age distribution, and source trust scores
+- **Automated Source Credibility** — Source trust scoring based on origin type (research_summary > manual > conversation) with visual trust indicators
+- **Context Engineering** — Token budget management with priority-based truncation, automatic conversation summarization for long sessions, retrieval dedup, and source attribution via `[ref:ID]` citations
+- **Dynamic Context Allocation** — Retrieval volume automatically adjusts based on query complexity (word count, question depth, multi-part queries)
+- **Inline Edit for All Namespaces** — Edit entries across all archival namespaces (manual, research, ingested, etc.) directly from the Document Library
+- **Knowledge Graph** — In-memory entity-relationship graph built from archival memories with interactive force-directed visualization
 
 ## Demo
 
@@ -30,38 +39,43 @@ A personal knowledge agent with persistent memory, built on LangGraph. It can re
 ### Agent Graph
 
 ```
-START → route_intent
-  ├── "ingest" → ingest_document → respond → memory_pipeline → [consolidate?] → END
-  └── (other)  → recall_memory → evaluate_recall
-                   ├── (sufficient) → respond → memory_pipeline → [consolidate?] → END
-                   └── (insufficient) → generate_query → [web_research × N] → reflection
-                         ├── (gaps) → loop
-                         └── (sufficient) → save_to_archival → respond → memory_pipeline → [consolidate?] → END
+START -> route_intent
+  |-- "ingest" -> ingest_document -> respond -> memory_pipeline -> [consolidate?] -> END
+  +-- (other)  -> recall_memory -> evaluate_recall
+                   |-- (sufficient) -> respond -> memory_pipeline -> [consolidate?] -> END
+                   +-- (insufficient) -> generate_query -> [web_research x N] -> reflection
+                         |-- (gaps) -> loop
+                         +-- (sufficient) -> save_to_archival -> respond -> memory_pipeline -> [consolidate?] -> END
 ```
 
-`evaluate_recall` judges whether retrieved memory is sufficient — skipping web search when it is. `memory_pipeline` extracts facts after every response with conflict resolution; `consolidate` merges duplicates via embedding clustering every N turns.
+`evaluate_recall` judges whether retrieved memory is sufficient -- skipping web search when it is. `memory_pipeline` extracts facts after every response with conflict resolution; `consolidate` merges duplicates via embedding clustering every N turns.
 
 ### Retrieval Pipeline
 
 ```
-Query → [Rewrite] → [HyDE] → Search (vector + BM25) → Re-rank (cross-encoder) → [MMR diversity] → Results
+Query -> [Rewrite] -> [HyDE] -> Search (vector + BM25, dynamic limit) -> Re-rank (cross-encoder) -> [MMR diversity] -> Results
 ```
 
 - **Query Rewriting** — Resolves ambiguous/referential queries using conversation history
 - **HyDE** — Generates a hypothetical answer, embeds it instead of the raw query
+- **Dynamic Context Allocation** — Adjusts retrieval limit (3-8 results) based on query complexity
 - **MMR** — Balances relevance and diversity in final results
 
 ### Memory Pipeline
 
 ```
 User + Assistant messages
-  → LLM judgment (memorable?)
-  → Search existing memories
-  → Extract ADD/UPDATE/DELETE operations
-  → Conflict resolution (FACT_CONFLICT_PROMPT)
-  → Execute operations
-  → Store session context window (every N turns)
+  -> LLM judgment (memorable?)
+  -> Search existing memories
+  -> Extract ADD/UPDATE/DELETE operations
+  -> Conflict resolution (FACT_CONFLICT_PROMPT)
+  -> Execute operations (with version snapshots)
+  -> Store session context window (every N turns)
 ```
+
+### Conversation Summarization
+
+When message count exceeds a configurable threshold (default: 20), older turns are compressed into a summary via LLM. The summary is stored in state and prepended as context, keeping only recent turns as raw text.
 
 ## Tech Stack
 
@@ -98,7 +112,7 @@ cp .env.example .env
 ```
 
 ```env
-# LLM (OpenAI-compatible — works with OpenAI, DeepSeek, MiMo, etc.)
+# LLM (OpenAI-compatible -- works with OpenAI, DeepSeek, MiMo, etc.)
 LLM_API_KEY=your-api-key
 LLM_BASE_URL=https://api.openai.com/v1
 LLM_MODEL=gpt-4o-mini
@@ -169,65 +183,87 @@ python scripts/manage_archival.py consolidate --namespace research        # full
 ```
 knowledge-agent/
 ├── backend/
-│   ├── src/agent/
-│   │   ├── graph.py                  # LangGraph definition
-│   │   ├── state.py                  # AgentState TypedDict
-│   │   ├── configuration.py          # Runtime configuration
-│   │   ├── prompts.py                # Prompt templates
-│   │   ├── db.py                     # Centralized DB helpers (archival + recall)
-│   │   ├── memory/
-│   │   │   ├── block.py              # Block model
-│   │   │   ├── core_memory.py        # CoreMemory + undo history
-│   │   │   └── tools.py              # Memory edit + archival tools
-│   │   ├── storage/
-│   │   │   ├── embedding.py          # BGE-M3 local embedding + LRU cache
-│   │   │   ├── reranker.py           # Cross-encoder re-ranking
-│   │   │   └── ingestion.py          # Document ingestion pipeline
-│   │   └── nodes/
-│   │       ├── memory_manager.py     # Intent routing + recall + archival save
-│   │       ├── memory_pipeline.py    # Selective capture + consolidation
-│   │       ├── researcher.py         # Web research + reflection
-│   │       └── responder.py          # Response generation
+│   ├── src/
+│   │   ├── agent/
+│   │   │   ├── graph.py                  # LangGraph definition
+│   │   │   ├── state.py                  # AgentState TypedDict
+│   │   │   ├── configuration.py          # Runtime configuration
+│   │   │   ├── prompts.py                # Prompt templates
+│   │   │   ├── db/
+│   │   │   │   ├── _base.py              # Shared helpers (dedup, MMR, cosine)
+│   │   │   │   ├── archival.py           # Archival memory CRUD + structured indexes
+│   │   │   │   ├── recall.py             # Recall memory search, save, cleanup
+│   │   │   │   ├── versioning.py         # Version history (archival + recall + core memory)
+│   │   │   │   ├── conflicts.py          # Conflict review queue + resolution
+│   │   │   │   ├── documents.py          # Document management + content-hash dedup
+│   │   │   │   ├── analytics.py          # Analytics stats + source trust scoring
+│   │   │   │   └── importance.py         # Importance scoring + weighted search
+│   │   │   ├── memory/
+│   │   │   │   ├── block.py              # Block model
+│   │   │   │   ├── core_memory.py        # CoreMemory + undo history + compression
+│   │   │   │   ├── importance.py         # Importance score calculation
+│   │   │   │   ├── knowledge_graph.py    # In-memory entity-relationship graph
+│   │   │   │   └── tools.py              # Memory edit + archival tools
+│   │   │   ├── storage/
+│   │   │   │   ├── embedding.py          # BGE-M3 local embedding + LRU cache
+│   │   │   │   ├── reranker.py           # Cross-encoder re-ranking
+│   │   │   │   └── ingestion.py          # Document ingestion pipeline
+│   │   │   └── nodes/
+│   │   │       ├── memory_manager.py     # Intent routing + recall + dynamic context allocation
+│   │   │       ├── memory_pipeline.py    # Selective capture + consolidation
+│   │   │       ├── researcher.py         # Web research + reflection
+│   │   │       └── responder.py          # Response generation + summarization + token budget
+│   │   └── api_server.py                 # REST API (FastAPI) for frontend
 │   ├── scripts/
 │   │   ├── test_recall.py
 │   │   ├── test_locomo.py
 │   │   └── manage_archival.py
-│   ├── tests/                        # 198 unit tests
+│   ├── tests/                            # Unit tests
 │   ├── examples/cli_chat.py
-│   ├── config.yaml                   # Feature flags and tuning
-│   └── docker-compose.yml            # PostgreSQL + pgvector
-docs/                                  # Project documentation
-├── architecture/                      # System overview, graph flow, data model
-├── design-decisions/                  # ADRs (memory, HyDE, selective capture, reranker, MMR)
-├── modules/                           # Module-level documentation
-├── api/                               # REST API reference
-├── deployment/                        # Setup guide
-└── roadmap.md                         # Future extensibility plan
+│   ├── config.yaml                       # Feature flags and tuning
+│   └── docker-compose.yml                # PostgreSQL + pgvector
+├── docs/                                  # Project documentation
+│   ├── architecture/                      # System overview, graph flow, data model
+│   ├── design-decisions/                  # ADRs (memory, HyDE, selective capture, reranker, MMR)
+│   ├── modules/                           # Module-level documentation
+│   ├── api/                               # REST API reference
+│   ├── deployment/                        # Setup guide
+│   └── roadmap.md                         # Future extensibility plan
 └── frontend/src/
     ├── App.tsx
     └── components/
+        ├── ChatMessagesView.tsx           # Chat UI with streaming
+        ├── DocumentLibrary.tsx            # Document/archival/recall browser + version history
+        ├── MemorySearchPanel.tsx          # Advanced memory search
+        ├── MemoryAnalytics.tsx            # Analytics dashboard
+        ├── KnowledgeGraphView.tsx         # Interactive knowledge graph visualization
+        ├── CoreMemoryPanel.tsx            # Core memory blocks viewer
+        ├── ActivityTimeline.tsx           # Memory operations timeline
+        ├── ThreadSidebar.tsx              # Session/thread selector
+        ├── InputForm.tsx                  # Message input
+        └── WelcomeScreen.tsx              # Landing page
 ```
 
-## Roadmap
+## Configuration
 
-- **Temporal query support** — Improve retrieval for time-sensitive questions ("what happened on Monday", "last week's discussion"). Approaches: temporal metadata extraction during ingestion, time-aware query expansion, and date-range filtering on archival search.
-- **Edit support for all namespaces** — Currently only `manual` entries can be edited from the Document Library UI. Extend inline edit to `ingested`, `research`, and other archival namespaces.
-- **Version diff view** — Side-by-side comparison between two archival versions, highlighting added/removed/changed text for easier review.
-- **Bulk conflict resolution** — Allow approving or rejecting multiple pending conflict reviews at once, with a batch action UI.
-- **Recall & Core Memory version tracking** — Extend the snapshot-before-mutate pattern to Recall memory and Core Memory blocks, enabling full rollback across all three tiers.
-- **Memory analytics dashboard** — Visualize memory quality metrics: total entries by namespace, conflict resolution rate, version history depth, source trust distribution, and storage growth over time.
-- **Automated source credibility** — Auto-detect source reliability from content patterns (e.g., peer-reviewed papers, official docs vs. blog posts) instead of relying solely on the `metadata.source` field.
-- **Context engineering improvements**:
-  - **Token budget management** — Count and cap total tokens injected into the LLM (history, retrieval results, system prompt) to prevent context window overflow.
-  - **Message summarization** — Compress early conversation turns into summaries, keeping only recent turns as raw text, to avoid context loss or token waste in long conversations.
-  - **Retrieval dedup & conflict resolution** — Deduplicate Archival and Recall results before injection; annotate or resolve conflicting information.
-  - **Context source attribution** — Attach structured metadata (source, timestamp, confidence) to injected retrieval results so the LLM can judge reliability and recency.
-  - **Dynamic context allocation** — Adjust retrieval and injection volume based on query complexity: fewer results for simple questions, more for complex ones.
+All feature flags and tuning parameters are in `backend/config.yaml`:
+
+| Parameter | Default | Description |
+|---|---|---|
+| `summarize_threshold` | 20 | Summarize older turns when message count exceeds this |
+| `summarize_keep_recent` | 10 | Recent messages kept as raw text during summarization |
+| `memory_dedup_threshold` | 0.8 | Cosine similarity threshold for fact deduplication |
+| `rerank_enabled` | true | Cross-encoder re-ranking |
+| `hyde_enabled` | true | HyDE hypothetical document embeddings |
+| `mmr_enabled` | true | MMR diversity filtering |
+| `proactive_memory_enabled` | true | Push relevant memories at conversation start |
+| `structured_extraction` | true | Entity and temporal extraction from facts |
+| `document_enrichment` | true | LLM-assisted chunk enrichment during ingestion |
 
 ## Acknowledgments
 
-- **[Letta](https://github.com/letta-ai/letta)** — Three-tier memory architecture, Block model, self-editing memory concept.
-- **[Gemini Fullstack LangGraph Quickstart](https://github.com/google-gemini/gemini-fullstack-langgraph-quickstart)** — Fullstack agent pattern, research loop with reflection, activity timeline UI.
+- **[Letta](https://github.com/letta-ai/letta)** -- Three-tier memory architecture, Block model, self-editing memory concept.
+- **[Gemini Fullstack LangGraph Quickstart](https://github.com/google-gemini/gemini-fullstack-langgraph-quickstart)** -- Fullstack agent pattern, research loop with reflection, activity timeline UI.
 
 ## License
 

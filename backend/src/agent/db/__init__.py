@@ -7,7 +7,7 @@ This package is split into submodules for maintainability:
 - _base: shared helpers and constants
 - archival: archival memory CRUD and maintenance
 - recall: recall memory search, save, cleanup
-- versioning: version history snapshot, query, rollback
+- versioning: version history snapshot, query, rollback (archival + recall + core memory)
 - conflicts: conflict review queue and resolution
 - documents: document management and dedup
 - analytics: analytics stats and source trust
@@ -84,6 +84,13 @@ from agent.db.versioning import (
     delete_version,
     get_version_history,
     rollback_to_version,
+    snapshot_recall_version,
+    get_recall_version_history,
+    rollback_recall_version,
+    delete_recall_version,
+    snapshot_core_memory_block,
+    get_core_memory_version_history,
+    rollback_core_memory_block,
 )
 
 __all__ = [
@@ -107,4 +114,9 @@ __all__ = [
     "cleanup_recall", "get_recent_recall", "save_to_recall", "search_recall",
     # versioning
     "delete_version", "get_version_history", "rollback_to_version",
+    # recall versioning
+    "snapshot_recall_version", "get_recall_version_history", "rollback_recall_version",
+    "delete_recall_version",
+    # core memory versioning
+    "snapshot_core_memory_block", "get_core_memory_version_history", "rollback_core_memory_block",
 ]

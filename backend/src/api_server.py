@@ -478,6 +478,38 @@ def get_core_memory(thread_id: str):
     return CoreMemoryResponse(blocks=blocks, raw=raw)
 
 
+
+# --- Core Memory Version History endpoints ---
+
+
+class CoreMemoryVersionEntry(BaseModel):
+    version_id: str
+    block_value: str
+    version_number: int
+    change_type: str
+    changed_by: str
+    created_at: str | None
+
+
+@app.get("/api/core-memory/{thread_id}/{block_label}/versions", response_model=list[CoreMemoryVersionEntry])
+def get_core_memory_versions(thread_id: str, block_label: str):
+    from agent.db import get_core_memory_version_history
+    return [CoreMemoryVersionEntry(**v) for v in get_core_memory_version_history(thread_id, block_label)]
+
+
+@app.post("/api/core-memory/{thread_id}/{block_label}/rollback")
+def rollback_core_memory(thread_id: str, block_label: str, version_number: int = Query(...)):
+    from fastapi import HTTPException
+
+    from agent.db import rollback_core_memory_block
+
+    restored_value = rollback_core_memory_block(thread_id, block_label, version_number)
+    if restored_value is None:
+        raise HTTPException(status_code=404, detail="Version not found")
+    return {"rolled_back": True, "thread_id": thread_id, "block_label": block_label,
+            "to_version": version_number, "value": restored_value}
+
+
 # --- Version History & Rollback endpoints ---
 
 
@@ -714,10 +746,14 @@ def update_archival_entry(entry_id: str, req: UpdateEntryRequest):
 
 @app.delete("/api/recall/entries/{entry_id}")
 def delete_recall_entry(entry_id: str):
-    """Delete a single recall memory entry."""
+    """Delete a single recall memory entry (with version snapshot)."""
     from fastapi import HTTPException
 
+    from agent.db import snapshot_recall_version
     from agent.storage import get_conn
+
+    # Snapshot before delete for version history
+    snapshot_recall_version(entry_id, change_type="delete", changed_by="manual_edit")
 
     with get_conn() as conn:
         result = conn.execute(
@@ -730,6 +766,50 @@ def delete_recall_entry(entry_id: str):
 
     return {"deleted": True, "entry_id": entry_id}
 
+
+# --- Recall Version History endpoints ---
+
+
+class RecallVersionEntry(BaseModel):
+    version_id: str
+    content: str
+    metadata: dict
+    version_number: int
+    change_type: str
+    changed_by: str
+    created_at: str | None
+    thread_id: str | None = None
+    role: str | None = None
+
+
+@app.get("/api/recall/entries/{entry_id}/versions", response_model=list[RecallVersionEntry])
+def get_recall_entry_versions(entry_id: str):
+    from agent.db import get_recall_version_history
+    return [RecallVersionEntry(**v) for v in get_recall_version_history(entry_id)]
+
+
+@app.post("/api/recall/entries/{entry_id}/rollback")
+def rollback_recall_entry(entry_id: str, version_number: int = Query(...)):
+    from fastapi import HTTPException
+
+    from agent.db import rollback_recall_version
+
+    success = rollback_recall_version(entry_id, version_number)
+    if not success:
+        raise HTTPException(status_code=404, detail="Version not found")
+    return {"rolled_back": True, "entry_id": entry_id, "to_version": version_number}
+
+
+@app.delete("/api/recall/versions/{version_id}")
+def delete_recall_version_entry(version_id: str):
+    from fastapi import HTTPException
+
+    from agent.db import delete_recall_version
+
+    success = delete_recall_version(version_id)
+    if not success:
+        raise HTTPException(status_code=404, detail="Version not found")
+    return {"deleted": True, "version_id": version_id}
 
 @app.delete("/api/recall/entries")
 def delete_recall_by_thread(thread_id: str = Query(...)):

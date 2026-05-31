@@ -1,28 +1,22 @@
-import { useState, useCallback, useRef, useEffect } from "react";
+import { useState, useCallback, useEffect, useRef } from "react";
 import { Link } from "react-router-dom";
 import { Button } from "@/components/ui/button";
-import { Card, CardContent } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
+import { Card, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
-import {
-  ArrowLeft,
-  Search,
-  Loader2,
-  Network,
-  X,
-  ChevronRight,
-} from "lucide-react";
-import { cn } from "@/lib/utils";
+import { ArrowLeft, GitBranch, Loader2, Search, Minus, Plus, RotateCcw } from "lucide-react";
 
 const API_BASE = import.meta.env.DEV ? "http://localhost:8000" : "";
 
-// ---- Types ----
 interface GraphNode {
   id: string;
-  name: string;
-  type: string;
+  label: string;
+  namespace: string;
   mention_count: number;
-  memories: RelatedMemory[];
+  x?: number;
+  y?: number;
+  vx?: number;
+  vy?: number;
 }
 
 interface GraphEdge {
@@ -31,587 +25,551 @@ interface GraphEdge {
   weight: number;
 }
 
-interface RelatedMemory {
-  id: string;
-  content: string;
-  namespace: string;
-  created_at: string;
-}
-
 interface GraphData {
   nodes: GraphNode[];
   edges: GraphEdge[];
 }
 
-// Force-directed layout node with physics state
-interface SimNode extends GraphNode {
-  x: number;
-  y: number;
-  vx: number;
-  vy: number;
-  radius: number;
+const NAMESPACE_COLORS: Record<string, string> = {
+  ingested: "#38bdf8",
+  research: "#34d399",
+  manual: "#fbbf24",
+  conversation_facts: "#c084fc",
+};
+
+const DEFAULT_COLOR = "#a3a3a3";
+
+function getNodeColor(namespace: string): string {
+  return NAMESPACE_COLORS[namespace] || DEFAULT_COLOR;
 }
 
-// ---- Force simulation constants ----
-const REPULSION = 800;
-const ATTRACTION = 0.005;
-const DAMPING = 0.85;
-const CENTER_GRAVITY = 0.01;
-const ITERATIONS_PER_FRAME = 3;
+// Simple force-directed layout simulation
+function simulateStep(
+  nodes: GraphNode[],
+  edges: GraphEdge[],
+  width: number,
+  height: number
+): boolean {
+  const alpha = 0.3;
+  const repulsion = 800;
+  const attraction = 0.01;
+  const damping = 0.85;
+  const centerGravity = 0.01;
+
+  let totalMovement = 0;
+
+  // Center gravity
+  const cx = width / 2;
+  const cy = height / 2;
+  for (const node of nodes) {
+    if (node.x === undefined || node.y === undefined) continue;
+    node.vx = (node.vx || 0) + (cx - node.x) * centerGravity;
+    node.vy = (node.vy || 0) + (cy - node.y) * centerGravity;
+  }
+
+  // Repulsion between all node pairs
+  for (let i = 0; i < nodes.length; i++) {
+    for (let j = i + 1; j < nodes.length; j++) {
+      const a = nodes[i];
+      const b = nodes[j];
+      if (a.x === undefined || a.y === undefined || b.x === undefined || b.y === undefined) continue;
+      const dx = b.x - a.x;
+      const dy = b.y - a.y;
+      const dist = Math.max(Math.sqrt(dx * dx + dy * dy), 1);
+      const force = repulsion / (dist * dist);
+      const fx = (dx / dist) * force;
+      const fy = (dy / dist) * force;
+      a.vx = (a.vx || 0) - fx;
+      a.vy = (a.vy || 0) - fy;
+      b.vx = (b.vx || 0) + fx;
+      b.vy = (b.vy || 0) + fy;
+    }
+  }
+
+  // Attraction along edges
+  const nodeMap = new Map(nodes.map((n) => [n.id, n]));
+  for (const edge of edges) {
+    const a = nodeMap.get(edge.source);
+    const b = nodeMap.get(edge.target);
+    if (!a || !b || a.x === undefined || a.y === undefined || b.x === undefined || b.y === undefined) continue;
+    const dx = b.x - a.x;
+    const dy = b.y - a.y;
+    const dist = Math.sqrt(dx * dx + dy * dy);
+    if (dist < 1) continue;
+    const force = dist * attraction * (1 + edge.weight * 0.2);
+    const fx = (dx / dist) * force;
+    const fy = (dy / dist) * force;
+    a.vx = (a.vx || 0) + fx;
+    a.vy = (a.vy || 0) + fy;
+    b.vx = (b.vx || 0) - fx;
+    b.vy = (b.vy || 0) - fy;
+  }
+
+  // Apply velocities
+  for (const node of nodes) {
+    if (node.x === undefined || node.y === undefined) continue;
+    node.vx = (node.vx || 0) * damping;
+    node.vy = (node.vy || 0) * damping;
+    const newX = node.x + (node.vx || 0) * alpha;
+    const newY = node.y + (node.vy || 0) * alpha;
+    // Keep within bounds
+    const padding = 60;
+    node.x = Math.max(padding, Math.min(width - padding, newX));
+    node.y = Math.max(padding, Math.min(height - padding, newY));
+    totalMovement += Math.abs(node.vx || 0) + Math.abs(node.vy || 0);
+  }
+
+  return totalMovement > 0.5; // true if still moving
+}
 
 export function KnowledgeGraphView() {
-  const [searchEntity, setSearchEntity] = useState("");
+  const [centerEntity, setCenterEntity] = useState("");
   const [radius, setRadius] = useState(2);
   const [graphData, setGraphData] = useState<GraphData | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [selectedNode, setSelectedNode] = useState<GraphNode | null>(null);
-  const [simNodes, setSimNodes] = useState<SimNode[]>([]);
-  const [simEdges, setSimEdges] = useState<GraphEdge[]>([]);
+  const [hoveredNode, setHoveredNode] = useState<GraphNode | null>(null);
+  const [mousePos, setMousePos] = useState({ x: 0, y: 0 });
+  const [dragNode, setDragNode] = useState<string | null>(null);
+  const [relatedMemories, setRelatedMemories] = useState<any[] | null>(null);
+  const [selectedNode, setSelectedNode] = useState<string | null>(null);
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const nodesRef = useRef<GraphNode[]>([]);
   const animRef = useRef<number>(0);
-  const svgRef = useRef<SVGSVGElement>(null);
-  const draggingRef = useRef<{
-    id: string;
-    offsetX: number;
-    offsetY: number;
-  } | null>(null);
-  const [svgSize, setSvgSize] = useState({ width: 800, height: 600 });
+  const dragOffset = useRef({ x: 0, y: 0 });
 
-  // Measure SVG container
-  useEffect(() => {
-    function measure() {
-      if (svgRef.current) {
-        const rect = svgRef.current.getBoundingClientRect();
-        setSvgSize({ width: rect.width || 800, height: rect.height || 600 });
-      }
-    }
-    measure();
-    window.addEventListener("resize", measure);
-    return () => window.removeEventListener("resize", measure);
-  }, []);
-
-  // Fetch graph data
   const fetchGraph = useCallback(async () => {
-    if (!searchEntity.trim()) return;
+    if (!centerEntity.trim()) return;
     setLoading(true);
     setError(null);
+    setRelatedMemories(null);
     setSelectedNode(null);
-
     try {
       const params = new URLSearchParams({
-        center: searchEntity.trim(),
+        center: centerEntity.trim(),
         radius: String(radius),
       });
       const res = await fetch(`${API_BASE}/api/analytics/knowledge-graph?${params}`);
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      if (!res.ok) throw new Error(`Failed (${res.status})`);
       const data: GraphData = await res.json();
 
-      const nodes = data.nodes ?? [];
-      const edges = data.edges ?? [];
+      // Initialize node positions
+      const canvas = canvasRef.current;
+      const w = canvas?.width || 800;
+      const h = canvas?.height || 500;
+      const existingMap = new Map(nodesRef.current.map((n) => [n.id, { x: n.x, y: n.y }]));
 
-      if (nodes.length === 0) {
-        setGraphData({ nodes: [], edges: [] });
-        setSimNodes([]);
-        setSimEdges([]);
-        setLoading(false);
-        return;
+      for (const node of data.nodes) {
+        const existing = existingMap.get(node.id);
+        if (existing) {
+          node.x = existing.x;
+          node.y = existing.y;
+        } else {
+          node.x = w / 2 + (Math.random() - 0.5) * 200;
+          node.y = h / 2 + (Math.random() - 0.5) * 200;
+        }
+        node.vx = 0;
+        node.vy = 0;
       }
 
-      // Initialise simulation positions
-      const cx = svgSize.width / 2;
-      const cy = svgSize.height / 2;
-      const maxMentions = Math.max(...nodes.map((n) => n.mention_count), 1);
-      const sn: SimNode[] = nodes.map((n, i) => {
-        const angle = (2 * Math.PI * i) / nodes.length;
-        const spread = Math.min(svgSize.width, svgSize.height) * 0.3;
-        return {
-          ...n,
-          x: cx + Math.cos(angle) * spread + (Math.random() - 0.5) * 40,
-          y: cy + Math.sin(angle) * spread + (Math.random() - 0.5) * 40,
-          vx: 0,
-          vy: 0,
-          radius: 12 + (n.mention_count / maxMentions) * 28,
-        };
-      });
-
-      setGraphData({ nodes, edges });
-      setSimNodes(sn);
-      setSimEdges(edges);
+      nodesRef.current = data.nodes;
+      setGraphData(data);
     } catch (err: any) {
-      setError(err.message ?? "Failed to fetch graph");
-    } finally {
-      setLoading(false);
+      setError(err.message || "Failed to load graph");
     }
-  }, [searchEntity, radius, svgSize.width, svgSize.height]);
+    setLoading(false);
+  }, [centerEntity, radius]);
 
-  // Force simulation loop
-  useEffect(() => {
-    if (simNodes.length === 0) return;
-    let running = true;
-
-    function tick() {
-      if (!running) return;
-      setSimNodes((prev) => {
-        if (prev.length === 0) return prev;
-        const next = prev.map((n) => ({ ...n }));
-        const cx = svgSize.width / 2;
-        const cy = svgSize.height / 2;
-        const pad = 40;
-
-        for (let iter = 0; iter < ITERATIONS_PER_FRAME; iter++) {
-          // Repulsion between all pairs
-          for (let i = 0; i < next.length; i++) {
-            for (let j = i + 1; j < next.length; j++) {
-              const dx = next[i].x - next[j].x;
-              const dy = next[i].y - next[j].y;
-              const distSq = dx * dx + dy * dy + 1;
-              const dist = Math.sqrt(distSq);
-              const force = REPULSION / distSq;
-              const fx = (dx / dist) * force;
-              const fy = (dy / dist) * force;
-              next[i].vx += fx;
-              next[i].vy += fy;
-              next[j].vx -= fx;
-              next[j].vy -= fy;
-            }
-          }
-
-          // Attraction along edges
-          const nodeMap = new Map(next.map((n) => [n.id, n]));
-          for (const edge of simEdges) {
-            const a = nodeMap.get(edge.source);
-            const b = nodeMap.get(edge.target);
-            if (!a || !b) continue;
-            const dx = b.x - a.x;
-            const dy = b.y - a.y;
-            const dist = Math.sqrt(dx * dx + dy * dy) + 1;
-            const force = ATTRACTION * dist * edge.weight;
-            const fx = (dx / dist) * force;
-            const fy = (dy / dist) * force;
-            a.vx += fx;
-            a.vy += fy;
-            b.vx -= fx;
-            b.vy -= fy;
-          }
-
-          // Center gravity + damping + position update
-          for (const n of next) {
-            if (draggingRef.current?.id === n.id) continue;
-            n.vx += (cx - n.x) * CENTER_GRAVITY;
-            n.vy += (cy - n.y) * CENTER_GRAVITY;
-            n.vx *= DAMPING;
-            n.vy *= DAMPING;
-            n.x += n.vx;
-            n.y += n.vy;
-            // Bounds
-            n.x = Math.max(pad, Math.min(svgSize.width - pad, n.x));
-            n.y = Math.max(pad, Math.min(svgSize.height - pad, n.y));
-          }
+  const handleNodeClick = useCallback(
+    async (nodeId: string) => {
+      setSelectedNode(nodeId);
+      try {
+        const params = new URLSearchParams({ entity: nodeId, limit: "10" });
+        const res = await fetch(`${API_BASE}/api/analytics/knowledge-graph/entity-memories?${params}`);
+        if (res.ok) {
+          setRelatedMemories(await res.json());
+        } else {
+          setRelatedMemories([]);
         }
-        return next;
-      });
-      animRef.current = requestAnimationFrame(tick);
-    }
-    animRef.current = requestAnimationFrame(tick);
-    return () => {
-      running = false;
-      cancelAnimationFrame(animRef.current);
-    };
-  }, [simNodes.length, simEdges, svgSize.width, svgSize.height]);
-
-  // Drag handlers
-  const handleMouseDown = useCallback(
-    (id: string, e: React.MouseEvent) => {
-      const node = simNodes.find((n) => n.id === id);
-      if (!node) return;
-      const svg = svgRef.current;
-      if (!svg) return;
-      const pt = svg.createSVGPoint();
-      pt.x = e.clientX;
-      pt.y = e.clientY;
-      const svgPt = pt.matrixTransform(svg.getScreenCTM()!.inverse());
-      draggingRef.current = {
-        id,
-        offsetX: node.x - svgPt.x,
-        offsetY: node.y - svgPt.y,
-      };
-    },
-    [simNodes]
-  );
-
-  const handleMouseMove = useCallback(
-    (e: React.MouseEvent) => {
-      if (!draggingRef.current) return;
-      const svg = svgRef.current;
-      if (!svg) return;
-      const pt = svg.createSVGPoint();
-      pt.x = e.clientX;
-      pt.y = e.clientY;
-      const svgPt = pt.matrixTransform(svg.getScreenCTM()!.inverse());
-      const { id, offsetX, offsetY } = draggingRef.current;
-      setSimNodes((prev) =>
-        prev.map((n) =>
-          n.id === id
-            ? { ...n, x: svgPt.x + offsetX, y: svgPt.y + offsetY, vx: 0, vy: 0 }
-            : n
-        )
-      );
+      } catch {
+        setRelatedMemories([]);
+      }
     },
     []
   );
 
-  const handleMouseUp = useCallback(() => {
-    draggingRef.current = null;
+  // Canvas rendering loop
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return;
+
+    const resizeCanvas = () => {
+      const rect = canvas.parentElement?.getBoundingClientRect();
+      if (rect) {
+        canvas.width = rect.width;
+        canvas.height = rect.height;
+      }
+    };
+    resizeCanvas();
+
+    const nodes = nodesRef.current;
+    const edges = graphData?.edges || [];
+    let running = true;
+
+    const draw = () => {
+      if (!running) return;
+      const w = canvas.width;
+      const h = canvas.height;
+      ctx.clearRect(0, 0, w, h);
+
+      if (nodes.length === 0) {
+        ctx.fillStyle = "#737373";
+        ctx.font = "14px sans-serif";
+        ctx.textAlign = "center";
+        ctx.fillText("Search for an entity to visualize its knowledge graph", w / 2, h / 2);
+        animRef.current = requestAnimationFrame(draw);
+        return;
+      }
+
+      // Run simulation
+      simulateStep(nodes, edges, w, h);
+
+      const nodeMap = new Map(nodes.map((n) => [n.id, n]));
+
+      // Draw edges
+      for (const edge of edges) {
+        const src = nodeMap.get(edge.source);
+        const tgt = nodeMap.get(edge.target);
+        if (!src || !tgt || src.x === undefined || src.y === undefined || tgt.x === undefined || tgt.y === undefined) continue;
+
+        ctx.beginPath();
+        ctx.moveTo(src.x, src.y);
+        ctx.lineTo(tgt.x, tgt.y);
+        ctx.strokeStyle = `rgba(100, 100, 100, ${Math.min(0.3 + edge.weight * 0.1, 0.7)})`;
+        ctx.lineWidth = Math.max(1, Math.min(edge.weight * 0.8, 4));
+        ctx.stroke();
+      }
+
+      // Draw nodes
+      const maxMentions = Math.max(...nodes.map((n) => n.mention_count), 1);
+      for (const node of nodes) {
+        if (node.x === undefined || node.y === undefined) continue;
+        const baseRadius = 6;
+        const radius = baseRadius + (node.mention_count / maxMentions) * 14;
+        const color = getNodeColor(node.namespace);
+
+        // Node circle
+        ctx.beginPath();
+        ctx.arc(node.x, node.y, radius, 0, Math.PI * 2);
+        ctx.fillStyle = hoveredNode?.id === node.id ? "#ffffff" : color;
+        ctx.fill();
+
+        // Node border
+        ctx.strokeStyle = hoveredNode?.id === node.id ? color : "rgba(0,0,0,0.3)";
+        ctx.lineWidth = hoveredNode?.id === node.id ? 3 : 1;
+        ctx.stroke();
+
+        // Label
+        ctx.fillStyle = "#d4d4d4";
+        ctx.font = `${hoveredNode?.id === node.id ? "bold " : ""}11px sans-serif`;
+        ctx.textAlign = "center";
+        ctx.fillText(node.label, node.x, node.y + radius + 14);
+      }
+
+      animRef.current = requestAnimationFrame(draw);
+    };
+
+    animRef.current = requestAnimationFrame(draw);
+
+    return () => {
+      running = false;
+      cancelAnimationFrame(animRef.current);
+    };
+  }, [graphData, hoveredNode]);
+
+  // Mouse interaction handlers
+  const getNodeAtPos = useCallback(
+    (x: number, y: number): GraphNode | null => {
+      const nodes = nodesRef.current;
+      const maxMentions = Math.max(...nodes.map((n) => n.mention_count), 1);
+      for (let i = nodes.length - 1; i >= 0; i--) {
+        const node = nodes[i];
+        if (node.x === undefined || node.y === undefined) continue;
+        const baseRadius = 6;
+        const r = baseRadius + (node.mention_count / maxMentions) * 14 + 4;
+        const dx = x - node.x;
+        const dy = y - node.y;
+        if (dx * dx + dy * dy <= r * r) return node;
+      }
+      return null;
+    },
+    []
+  );
+
+  const getCanvasPos = useCallback((e: React.MouseEvent<HTMLCanvasElement>) => {
+    const rect = canvasRef.current?.getBoundingClientRect();
+    if (!rect) return { x: 0, y: 0 };
+    return { x: e.clientX - rect.left, y: e.clientY - rect.top };
   }, []);
 
-  // Edge weight normalisation
-  const maxEdgeWeight = simEdges.reduce((m, e) => Math.max(m, e.weight), 1);
+  const handleMouseMove = useCallback(
+    (e: React.MouseEvent<HTMLCanvasElement>) => {
+      const pos = getCanvasPos(e);
+      setMousePos({ x: e.clientX, y: e.clientY });
 
-  // Colour by node type
-  const nodeColor = (type: string) => {
-    const colors: Record<string, string> = {
-      person: "#a78bfa", // purple
-      organization: "#38bdf8", // sky
-      location: "#4ade80", // green
-      concept: "#fbbf24", // amber
-      event: "#f87171", // red
-    };
-    return colors[type?.toLowerCase()] ?? "#94a3b8";
-  };
+      if (dragNode) {
+        const node = nodesRef.current.find((n) => n.id === dragNode);
+        if (node) {
+          node.x = pos.x - dragOffset.current.x;
+          node.y = pos.y - dragOffset.current.y;
+          node.vx = 0;
+          node.vy = 0;
+        }
+        return;
+      }
 
-  const handleSubmit = useCallback(
-    (e?: React.FormEvent) => {
-      e?.preventDefault();
-      fetchGraph();
+      const node = getNodeAtPos(pos.x, pos.y);
+      setHoveredNode(node);
+      if (canvasRef.current) {
+        canvasRef.current.style.cursor = node ? "pointer" : "default";
+      }
+    },
+    [dragNode, getNodeAtPos, getCanvasPos]
+  );
+
+  const handleMouseDown = useCallback(
+    (e: React.MouseEvent<HTMLCanvasElement>) => {
+      const pos = getCanvasPos(e);
+      const node = getNodeAtPos(pos.x, pos.y);
+      if (node && node.x !== undefined && node.y !== undefined) {
+        setDragNode(node.id);
+        dragOffset.current = { x: pos.x - node.x, y: pos.y - node.y };
+      }
+    },
+    [getCanvasPos, getNodeAtPos]
+  );
+
+  const handleMouseUp = useCallback(() => {
+    if (dragNode) {
+      setDragNode(null);
+    }
+  }, [dragNode]);
+
+  const handleClick = useCallback(
+    (e: React.MouseEvent<HTMLCanvasElement>) => {
+      if (dragNode) return; // Don't trigger click on drag end
+      const pos = getCanvasPos(e);
+      const node = getNodeAtPos(pos.x, pos.y);
+      if (node) {
+        handleNodeClick(node.id);
+      }
+    },
+    [dragNode, getCanvasPos, getNodeAtPos, handleNodeClick]
+  );
+
+  const handleKeyDown = useCallback(
+    (e: React.KeyboardEvent) => {
+      if (e.key === "Enter") fetchGraph();
     },
     [fetchGraph]
   );
 
   return (
-    <div className="flex justify-center w-full h-screen bg-neutral-800 text-neutral-100 overflow-hidden">
-      <div className="flex flex-col w-full max-w-[1280px] p-6 gap-4 h-full">
-        {/* Header */}
-        <div className="flex items-center justify-between shrink-0">
-          <div className="flex items-center gap-3">
-            <Link to="/">
-              <Button
-                variant="ghost"
-                size="icon"
-                className="text-neutral-400 hover:text-neutral-100"
-              >
-                <ArrowLeft className="w-5 h-5" />
-              </Button>
-            </Link>
-            <Network className="w-6 h-6 text-neutral-400" />
-            <h1 className="text-2xl font-semibold">Knowledge Graph</h1>
-          </div>
-        </div>
-
-        {/* Controls */}
-        <form
-          onSubmit={handleSubmit}
-          className="flex flex-col sm:flex-row gap-3 shrink-0"
-        >
-          <div className="relative flex-1">
-            <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-neutral-500" />
-            <Input
-              value={searchEntity}
-              onChange={(e) => setSearchEntity(e.target.value)}
-              placeholder="Search for an entity (e.g. person, concept)..."
-              className="pl-9 bg-neutral-700 border-neutral-600 text-neutral-100 placeholder:text-neutral-500"
-            />
-          </div>
-
-          <div className="flex items-center gap-2">
-            <span className="text-xs text-neutral-400 whitespace-nowrap">
-              Radius: {radius}
-            </span>
-            <input
-              type="range"
-              min={1}
-              max={3}
-              value={radius}
-              onChange={(e) => setRadius(Number(e.target.value))}
-              className="w-24 accent-sky-500"
-            />
-          </div>
-
-          <Button
-            type="submit"
-            disabled={loading || !searchEntity.trim()}
-            className="bg-sky-600 hover:bg-sky-700 text-white"
-          >
-            {loading ? (
-              <Loader2 className="w-4 h-4 animate-spin" />
-            ) : (
-              <Network className="w-4 h-4" />
-            )}
-            <span className="ml-1">Explore</span>
+    <div className="flex flex-col h-screen bg-neutral-800 text-neutral-100">
+      {/* Header */}
+      <div className="flex items-center gap-3 px-6 py-4 border-b border-neutral-700">
+        <Link to="/">
+          <Button variant="ghost" size="icon" className="text-neutral-400 hover:text-neutral-100">
+            <ArrowLeft className="w-5 h-5" />
           </Button>
-        </form>
+        </Link>
+        <GitBranch className="w-6 h-6 text-neutral-400" />
+        <h1 className="text-2xl font-semibold">Knowledge Graph</h1>
+      </div>
 
-        {/* Main content: graph + sidebar */}
-        <div className="flex flex-1 gap-4 min-h-0">
-          {/* Graph area */}
-          <div className="flex-1 bg-neutral-900 rounded-lg border border-neutral-700 overflow-hidden relative">
-            {loading && (
-              <div className="absolute inset-0 flex items-center justify-center z-10 bg-neutral-900/80">
-                <Loader2 className="w-8 h-8 text-sky-400 animate-spin" />
-              </div>
-            )}
-
-            {error && (
-              <div className="absolute inset-0 flex items-center justify-center z-10">
-                <Card className="bg-red-900/30 border-red-800">
-                  <CardContent className="p-4 text-red-300 text-sm">
-                    {error}
-                  </CardContent>
-                </Card>
-              </div>
-            )}
-
-            {!loading && !error && graphData && graphData.nodes.length === 0 && (
-              <div className="absolute inset-0 flex flex-col items-center justify-center text-neutral-500 gap-2">
-                <Network className="w-10 h-10 opacity-20" />
-                <p className="text-sm">No entities found for this query.</p>
-              </div>
-            )}
-
-            {!loading && !error && !graphData && (
-              <div className="absolute inset-0 flex flex-col items-center justify-center text-neutral-500 gap-2">
-                <Network className="w-12 h-12 opacity-20" />
-                <p className="text-sm">
-                  Search for an entity to visualise the knowledge graph.
-                </p>
-              </div>
-            )}
-
-            <svg
-              ref={svgRef}
-              width="100%"
-              height="100%"
-              className="cursor-grab active:cursor-grabbing"
-              onMouseMove={handleMouseMove}
-              onMouseUp={handleMouseUp}
-              onMouseLeave={handleMouseUp}
-            >
-              <defs>
-                <marker
-                  id="arrow"
-                  viewBox="0 0 10 10"
-                  refX="10"
-                  refY="5"
-                  markerWidth="6"
-                  markerHeight="6"
-                  orient="auto-start-reverse"
-                >
-                  <path d="M 0 0 L 10 5 L 0 10 z" fill="#525252" />
-                </marker>
-              </defs>
-
-              {/* Edges */}
-              {simNodes.length > 0 &&
-                simEdges.map((edge, i) => {
-                  const src = simNodes.find((n) => n.id === edge.source);
-                  const tgt = simNodes.find((n) => n.id === edge.target);
-                  if (!src || !tgt) return null;
-                  const opacity = 0.15 + (edge.weight / maxEdgeWeight) * 0.5;
-                  const strokeWidth = 1 + (edge.weight / maxEdgeWeight) * 3;
-                  return (
-                    <line
-                      key={i}
-                      x1={src.x}
-                      y1={src.y}
-                      x2={tgt.x}
-                      y2={tgt.y}
-                      stroke="#525252"
-                      strokeWidth={strokeWidth}
-                      opacity={opacity}
-                      markerEnd="url(#arrow)"
-                    />
-                  );
-                })}
-
-              {/* Nodes */}
-              {simNodes.map((node) => {
-                const isSelected = selectedNode?.id === node.id;
-                const color = nodeColor(node.type);
-                return (
-                  <g
-                    key={node.id}
-                    onMouseDown={(e) => handleMouseDown(node.id, e)}
-                    onClick={() => setSelectedNode(node)}
-                    className="cursor-pointer"
-                  >
-                    {isSelected && (
-                      <circle
-                        cx={node.x}
-                        cy={node.y}
-                        r={node.radius + 4}
-                        fill="none"
-                        stroke={color}
-                        strokeWidth={2}
-                        opacity={0.5}
-                      />
-                    )}
-                    <circle
-                      cx={node.x}
-                      cy={node.y}
-                      r={node.radius}
-                      fill={color}
-                      opacity={isSelected ? 1 : 0.75}
-                      stroke={isSelected ? "#fff" : "none"}
-                      strokeWidth={isSelected ? 2 : 0}
-                    />
-                    <text
-                      x={node.x}
-                      y={node.y + node.radius + 14}
-                      textAnchor="middle"
-                      fill="#d4d4d4"
-                      fontSize={11}
-                      fontFamily="sans-serif"
-                      className="pointer-events-none select-none"
-                    >
-                      {node.name.length > 16
-                        ? node.name.slice(0, 14) + "..."
-                        : node.name}
-                    </text>
-                  </g>
-                );
-              })}
-            </svg>
-          </div>
-
-          {/* Sidebar */}
-          <div
-            className={cn(
-              "bg-neutral-900 rounded-lg border border-neutral-700 overflow-y-auto transition-all duration-200",
-              selectedNode ? "w-80" : "w-0 opacity-0"
-            )}
-          >
-            {selectedNode && (
-              <div className="p-4 flex flex-col gap-4">
-                <div className="flex items-center justify-between">
-                  <h3 className="font-semibold text-neutral-100 text-lg">
-                    {selectedNode.name}
-                  </h3>
-                  <Button
-                    variant="ghost"
-                    size="icon"
-                    className="text-neutral-500 hover:text-neutral-200"
-                    onClick={() => setSelectedNode(null)}
-                  >
-                    <X className="w-4 h-4" />
-                  </Button>
-                </div>
-
-                <div className="flex items-center gap-2">
-                  <Badge
-                    className="text-[10px] border-0"
-                    style={{
-                      backgroundColor: nodeColor(selectedNode.type),
-                      color: "#000",
-                    }}
-                  >
-                    {selectedNode.type}
-                  </Badge>
-                  <span className="text-xs text-neutral-500">
-                    {selectedNode.mention_count} mention
-                    {selectedNode.mention_count !== 1 ? "s" : ""}
-                  </span>
-                </div>
-
-                <h4 className="text-xs font-medium text-neutral-400 uppercase tracking-wider">
-                  Related Memories
-                </h4>
-
-                {selectedNode.memories && selectedNode.memories.length > 0 ? (
-                  <div className="flex flex-col gap-2">
-                    {selectedNode.memories.map((mem) => (
-                      <Card
-                        key={mem.id}
-                        className="bg-neutral-800 border-neutral-600"
-                      >
-                        <CardContent className="p-3">
-                          <p className="text-xs text-neutral-300 line-clamp-4 whitespace-pre-wrap">
-                            {mem.content}
-                          </p>
-                          <div className="flex items-center justify-between mt-2">
-                            <Badge
-                              variant="outline"
-                              className="text-[9px] border-neutral-600 text-neutral-400"
-                            >
-                              {mem.namespace}
-                            </Badge>
-                            <span className="text-[10px] text-neutral-600">
-                              {new Date(mem.created_at).toLocaleDateString()}
-                            </span>
-                          </div>
-                        </CardContent>
-                      </Card>
-                    ))}
-                  </div>
-                ) : (
-                  <p className="text-xs text-neutral-600">
-                    No related memories found.
-                  </p>
-                )}
-
-                {/* Connected nodes */}
-                {simEdges.filter(
-                  (e) =>
-                    e.source === selectedNode.id ||
-                    e.target === selectedNode.id
-                ).length > 0 && (
-                  <>
-                    <h4 className="text-xs font-medium text-neutral-400 uppercase tracking-wider mt-2">
-                      Connections
-                    </h4>
-                    <div className="flex flex-col gap-1">
-                      {simEdges
-                        .filter(
-                          (e) =>
-                            e.source === selectedNode.id ||
-                            e.target === selectedNode.id
-                        )
-                        .map((edge, i) => {
-                          const otherId =
-                            edge.source === selectedNode.id
-                              ? edge.target
-                              : edge.source;
-                          const other = graphData?.nodes.find(
-                            (n) => n.id === otherId
-                          );
-                          if (!other) return null;
-                          return (
-                            <button
-                              key={i}
-                              onClick={() => setSelectedNode(other)}
-                              className="flex items-center gap-2 px-2 py-1.5 rounded hover:bg-neutral-800 text-left"
-                            >
-                              <ChevronRight className="w-3 h-3 text-neutral-600" />
-                              <span
-                                className="w-2 h-2 rounded-full"
-                                style={{
-                                  backgroundColor: nodeColor(other.type),
-                                }}
-                              />
-                              <span className="text-xs text-neutral-300 truncate">
-                                {other.name}
-                              </span>
-                              <span className="text-[10px] text-neutral-600 ml-auto">
-                                w:{edge.weight}
-                              </span>
-                            </button>
-                          );
-                        })}
-                    </div>
-                  </>
-                )}
-              </div>
-            )}
-          </div>
+      {/* Controls */}
+      <div className="flex items-center gap-3 px-6 py-3 border-b border-neutral-700 bg-neutral-800/50">
+        <div className="relative flex-1 max-w-md">
+          <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-neutral-500" />
+          <Input
+            placeholder="Entity name (e.g. Python, Machine Learning)..."
+            value={centerEntity}
+            onChange={(e) => setCenterEntity(e.target.value)}
+            onKeyDown={handleKeyDown}
+            className="pl-9 bg-neutral-700 border-neutral-600 text-neutral-100 placeholder:text-neutral-500"
+          />
         </div>
+
+        <div className="flex items-center gap-2">
+          <span className="text-xs text-neutral-400">Hops:</span>
+          <Button
+            variant="ghost"
+            size="icon"
+            className="h-7 w-7 text-neutral-400"
+            onClick={() => setRadius((r) => Math.max(1, r - 1))}
+          >
+            <Minus className="w-3 h-3" />
+          </Button>
+          <span className="text-sm text-neutral-200 w-4 text-center">{radius}</span>
+          <Button
+            variant="ghost"
+            size="icon"
+            className="h-7 w-7 text-neutral-400"
+            onClick={() => setRadius((r) => Math.min(3, r + 1))}
+          >
+            <Plus className="w-3 h-3" />
+          </Button>
+        </div>
+
+        <Button
+          variant="outline"
+          size="icon"
+          className="border-neutral-600 text-neutral-400"
+          onClick={() => {
+            nodesRef.current.forEach((n) => {
+              if (canvasRef.current) {
+                n.x = canvasRef.current.width / 2 + (Math.random() - 0.5) * 200;
+                n.y = canvasRef.current.height / 2 + (Math.random() - 0.5) * 200;
+                n.vx = 0;
+                n.vy = 0;
+              }
+            });
+          }}
+          title="Reset positions"
+        >
+          <RotateCcw className="w-4 h-4" />
+        </Button>
+
+        <Button
+          className="bg-sky-600 hover:bg-sky-700 text-white"
+          onClick={fetchGraph}
+          disabled={loading || !centerEntity.trim()}
+        >
+          {loading ? <Loader2 className="w-4 h-4 animate-spin" /> : "Visualize"}
+        </Button>
+      </div>
+
+      {/* Error */}
+      {error && (
+        <div className="mx-6 mt-3 text-sm text-red-400 bg-red-900/20 border border-red-800 rounded p-3">
+          {error}
+        </div>
+      )}
+
+      {/* Canvas + Sidebar */}
+      <div className="flex flex-1 min-h-0">
+        {/* Canvas */}
+        <div className="flex-1 relative">
+          <canvas
+            ref={canvasRef}
+            className="w-full h-full"
+            onMouseMove={handleMouseMove}
+            onMouseDown={handleMouseDown}
+            onMouseUp={handleMouseUp}
+            onClick={handleClick}
+          />
+
+          {/* Tooltip */}
+          {hoveredNode && !dragNode && (
+            <div
+              className="fixed z-50 pointer-events-none bg-neutral-900 border border-neutral-600 rounded px-3 py-2 shadow-lg text-xs"
+              style={{ left: mousePos.x + 12, top: mousePos.y + 12 }}
+            >
+              <div className="flex items-center gap-2 mb-1">
+                <div
+                  className="w-2 h-2 rounded-full"
+                  style={{ backgroundColor: getNodeColor(hoveredNode.namespace) }}
+                />
+                <span className="font-medium text-neutral-100">{hoveredNode.label}</span>
+              </div>
+              <div className="text-neutral-400">
+                <div>Namespace: {hoveredNode.namespace}</div>
+                <div>Mentions: {hoveredNode.mention_count}</div>
+              </div>
+            </div>
+          )}
+
+          {/* Legend */}
+          {graphData && graphData.nodes.length > 0 && (
+            <div className="absolute bottom-4 left-4 bg-neutral-900/90 border border-neutral-700 rounded p-3 text-xs">
+              <p className="text-neutral-400 mb-2 font-medium">Namespaces</p>
+              {Object.entries(NAMESPACE_COLORS).map(([ns, color]) => (
+                <div key={ns} className="flex items-center gap-2 mb-1">
+                  <div className="w-2.5 h-2.5 rounded-full" style={{ backgroundColor: color }} />
+                  <span className="text-neutral-300">{ns}</span>
+                </div>
+              ))}
+              <p className="text-neutral-500 mt-2">Node size = mention count</p>
+              <p className="text-neutral-500">Edge thickness = relationship weight</p>
+              <p className="text-neutral-500">Drag nodes to reposition</p>
+            </div>
+          )}
+        </div>
+
+        {/* Related memories sidebar */}
+        {selectedNode && (
+          <div className="w-80 border-l border-neutral-700 bg-neutral-800/50 overflow-auto">
+            <div className="p-4">
+              <div className="flex items-center justify-between mb-3">
+                <h3 className="text-sm font-medium text-neutral-200">
+                  Related Memories
+                </h3>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className="h-6 text-xs text-neutral-400"
+                  onClick={() => {
+                    setSelectedNode(null);
+                    setRelatedMemories(null);
+                  }}
+                >
+                  Close
+                </Button>
+              </div>
+              <p className="text-xs text-neutral-500 mb-3">
+                Entity: <span className="text-neutral-300">{selectedNode}</span>
+              </p>
+
+              {relatedMemories === null ? (
+                <div className="flex justify-center py-8">
+                  <Loader2 className="w-5 h-5 text-neutral-500 animate-spin" />
+                </div>
+              ) : relatedMemories.length === 0 ? (
+                <p className="text-xs text-neutral-500">No related memories found.</p>
+              ) : (
+                <div className="space-y-2">
+                  {relatedMemories.map((mem: any, i: number) => (
+                    <Card key={i} className="bg-neutral-700 border-neutral-600">
+                      <CardContent className="p-2">
+                        <div className="flex items-center gap-1 mb-1">
+                          <Badge className={`text-[10px] ${
+                            mem.namespace === "research"
+                              ? "bg-emerald-600"
+                              : mem.namespace === "manual"
+                                ? "bg-amber-600"
+                                : mem.namespace === "ingested"
+                                  ? "bg-sky-600"
+                                  : "bg-neutral-600"
+                          }`}>
+                            {mem.namespace}
+                          </Badge>
+                          <span className="text-[10px] text-neutral-500 ml-auto">
+                            {mem.importance ? (mem.importance * 100).toFixed(0) + "%" : ""}
+                          </span>
+                        </div>
+                        <p className="text-xs text-neutral-200 line-clamp-4">
+                          {mem.content}
+                        </p>
+                      </CardContent>
+                    </Card>
+                  ))}
+                </div>
+              )}
+            </div>
+          </div>
+        )}
       </div>
     </div>
   );

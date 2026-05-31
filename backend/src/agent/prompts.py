@@ -254,6 +254,13 @@ Latest message: {latest_message}
 Respond with ONLY the rewritten query (no JSON, no explanation).
 """
 
+SUMMARIZE_HISTORY_PROMPT = """Summarize the following conversation history into a concise paragraph that preserves all key information: facts discussed, decisions made, questions asked, and conclusions reached. Omit pleasantries and filler.
+
+Conversation:
+{history}
+
+Respond with ONLY the summary text (no JSON, no formatting)."""
+
 CHUNK_ENRICHMENT_PROMPT = """Extract structured metadata from this text chunk for improved retrieval.
 
 Text:

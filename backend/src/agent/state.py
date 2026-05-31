@@ -44,3 +44,6 @@ class AgentState(TypedDict):
 
     # --- Memory Operations Log ---
     memory_operations: Annotated[list, operator.add]  # 记忆操作日志
+
+    # --- Conversation Summary ---
+    conversation_summary: str  # compressed summary of older conversation turns

@@ -132,6 +132,14 @@ class Configuration(BaseModel):
         default=True,
         metadata={"description": "LLM-assisted extraction of summary/entities/keywords during ingestion."},
     )
+    summarize_threshold: int = Field(
+        default=20,
+        metadata={"description": "Summarize older conversation turns when message count exceeds this threshold."},
+    )
+    summarize_keep_recent: int = Field(
+        default=10,
+        metadata={"description": "Number of recent messages to keep as raw text when summarizing."},
+    )
 
     @classmethod
     def from_runnable_config(

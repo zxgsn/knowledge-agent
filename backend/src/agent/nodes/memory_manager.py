@@ -144,6 +144,46 @@ def _detect_entities(query: str, archival_results: list[dict]) -> list[str]:
     return entities
 
 
+def _estimate_query_complexity(query: str) -> int:
+    """Estimate query complexity and return a retrieval limit (3-8).
+
+    Simple heuristics based on:
+    - Word count (more words -> more complex)
+    - Presence of comparison/enumeration keywords
+    - Question depth markers (why, how, compare, etc.)
+    """
+    words = query.split()
+    word_count = len(words)
+    query_lower = query.lower()
+
+    # Base limit from word count
+    if word_count <= 5:
+        limit = 3
+    elif word_count <= 12:
+        limit = 5
+    else:
+        limit = 6
+
+    # Boost for complex question patterns
+    complex_patterns = [
+        "compare", "difference", "versus", "vs", "pros and cons",
+        "advantages", "disadvantages", "how does", "why does",
+        "explain", "analyze", "evaluate", "summarize all",
+        "list all", "what are the", "tell me everything",
+        "比较", "区别", "优缺点", "为什么", "如何", "分析", "总结",
+    ]
+    for pat in complex_patterns:
+        if pat in query_lower:
+            limit = min(limit + 2, 8)
+            break
+
+    # Boost for multi-part questions (contains "and", ";", multiple "?")
+    if query.count("?") >= 2 or ";" in query:
+        limit = min(limit + 1, 8)
+
+    return limit
+
+
 async def recall_memory(state: AgentState, config: RunnableConfig) -> dict:
     """Search archival AND recall memory for content referenced by the user."""
     from datetime import datetime, timezone
@@ -211,14 +251,17 @@ async def recall_memory(state: AgentState, config: RunnableConfig) -> dict:
         search_query_for_embed = await _generate_hypothetical(search_query, configurable)
 
     # Step 3: Search both archival and recall in parallel
+    # Dynamic context allocation: adjust retrieval volume based on query complexity
     dispatch_custom_event("progress", {"stage": "memory_search", "detail": "Searching archival + recall memory..."}, config=config)
+    retrieval_limit = _estimate_query_complexity(search_query)
+    logger.info("Dynamic retrieval limit: %d (query: %s)", retrieval_limit, search_query[:60])
     archival_task = asyncio.to_thread(
-        search_archival, search_query_for_embed, 5,
+        search_archival, search_query_for_embed, retrieval_limit,
         rerank_enabled=configurable.rerank_enabled,
         mmr_enabled=configurable.mmr_enabled,
         mmr_lambda=configurable.mmr_lambda,
     )
-    recall_task = asyncio.to_thread(search_recall, search_query, 5, thread_id=thread_id)
+    recall_task = asyncio.to_thread(search_recall, search_query, retrieval_limit, thread_id=thread_id)
     archival_results_raw, recall_results_raw = await asyncio.gather(
         archival_task, recall_task
     )

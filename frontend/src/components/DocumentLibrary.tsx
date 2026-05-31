@@ -6,6 +6,7 @@ import { Badge } from "@/components/ui/badge";
 import { Card, CardContent } from "@/components/ui/card";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { ScrollArea } from "@/components/ui/scroll-area";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { ArrowLeft, Search, BookOpen, MessageSquare, RefreshCw, FileText, ChevronDown, ChevronRight, Trash2, Plus, Pencil, History, ShieldCheck, ShieldAlert, Shield, AlertTriangle } from "lucide-react";
 
 interface ArchivalEntry {
@@ -143,11 +144,15 @@ export function DocumentLibrary() {
   const [formMetadata, setFormMetadata] = useState("{}");
   const [versions, setVersions] = useState<VersionEntry[]>([]);
   const [showVersionsFor, setShowVersionsFor] = useState<string | null>(null);
+  const [recallVersions, setRecallVersions] = useState<VersionEntry[]>([]);
+  const [showRecallVersionsFor, setShowRecallVersionsFor] = useState<string | null>(null);
   const [conflicts, setConflicts] = useState<ConflictReviewItem[]>([]);
   const [conflictEditId, setConflictEditId] = useState<string | null>(null);
   const [conflictEditText, setConflictEditText] = useState("");
   const [versionDiff, setVersionDiff] = useState<VersionDiff | null>(null);
   const [selectedConflicts, setSelectedConflicts] = useState<Set<string>>(new Set());
+  const [selectedDocs, setSelectedDocs] = useState<Set<string>>(new Set());
+  const [sourceTypeFilter, setSourceTypeFilter] = useState<string>("all");
 
   const fetchStats = useCallback(async () => {
     try {
@@ -247,6 +252,31 @@ export function DocumentLibrary() {
       }
     } catch (err) { console.error("Failed to fetch versions:", err); }
   }, []);
+
+  const fetchRecallVersions = useCallback(async (entryId: string) => {
+    try {
+      const res = await fetch(`${API_BASE}/api/recall/entries/${entryId}/versions`);
+      if (res.ok) {
+        setRecallVersions(await res.json());
+        setShowRecallVersionsFor(entryId);
+      }
+    } catch (err) { console.error("Failed to fetch recall versions:", err); }
+  }, []);
+
+  const handleRecallRollback = useCallback(async (entryId: string, versionNumber: number) => {
+    if (!window.confirm(`Rollback recall entry to version ${versionNumber}?`)) return;
+    try {
+      const res = await fetch(
+        `${API_BASE}/api/recall/entries/${entryId}/rollback?version_number=${versionNumber}`,
+        { method: "POST" }
+      );
+      if (res.ok) {
+        setShowRecallVersionsFor(null);
+        setRecallVersions([]);
+        handleRefresh();
+      }
+    } catch (err) { console.error("Failed to rollback recall entry:", err); }
+  }, [handleRefresh]);
 
   const fetchConflicts = useCallback(async () => {
     try {
@@ -377,6 +407,7 @@ export function DocumentLibrary() {
       const res = await fetch(`${API_BASE}/api/documents/${docId}`, { method: "DELETE" });
       if (res.ok || res.status === 404) {
         setSelectedDoc(null);
+        setSelectedDocs((prev) => { const next = new Set(prev); next.delete(docId); return next; });
         fetchDocuments();
         fetchStats();
       } else {
@@ -386,6 +417,41 @@ export function DocumentLibrary() {
       alert(`Delete failed: ${err}`);
     }
   };
+
+  const handleBulkDeleteDocs = async () => {
+    if (selectedDocs.size === 0) return;
+    if (!window.confirm(`Delete ${selectedDocs.size} selected documents?`)) return;
+    const ids = Array.from(selectedDocs);
+    let failed = 0;
+    for (const docId of ids) {
+      try {
+        const res = await fetch(`${API_BASE}/api/documents/${docId}`, { method: "DELETE" });
+        if (!res.ok && res.status !== 404) failed++;
+      } catch {
+        failed++;
+      }
+    }
+    setSelectedDocs(new Set());
+    fetchDocuments();
+    fetchStats();
+    if (failed > 0) alert(`Failed to delete ${failed} documents.`);
+  };
+
+  const toggleDocSelection = useCallback((docId: string) => {
+    setSelectedDocs((prev) => {
+      const next = new Set(prev);
+      if (next.has(docId)) next.delete(docId);
+      else next.add(docId);
+      return next;
+    });
+  }, []);
+
+  const filteredDocuments = documents.filter((doc) => {
+    if (sourceTypeFilter !== "all" && doc.source_type !== sourceTypeFilter) return false;
+    return true;
+  });
+
+  const sourceTypes = [...new Set(documents.map((d) => d.source_type).filter(Boolean))] as string[];
 
   const handleDeleteArchival = async (e: React.MouseEvent, entryId: string) => {
     e.stopPropagation();
@@ -532,7 +598,7 @@ export function DocumentLibrary() {
         </div>
 
         {/* Tabs + Content */}
-        <Tabs value={activeTab} onValueChange={setActiveTab} className="flex-1 flex flex-col min-h-0">
+        <Tabs value={activeTab} onValueChange={(v) => { setActiveTab(v); setSelectedDocs(new Set()); }} className="flex-1 flex flex-col min-h-0">
           <TabsList className="bg-neutral-700">
             <TabsTrigger value="all">All</TabsTrigger>
             <TabsTrigger value="ingested">Documents</TabsTrigger>
@@ -559,106 +625,174 @@ export function DocumentLibrary() {
                 <div className="text-center text-neutral-500 py-12">Loading...</div>
               ) : activeTab === "ingested" ? (
                 /* Document-level view for ingested tab */
-                documents.length === 0 ? (
-                  <div className="text-center text-neutral-500 py-12">No documents found.</div>
-                ) : (
-                  <div className="grid gap-2">
-                    {documents.map((doc) => (
-                      <Card
-                        key={doc.id}
-                        className={`bg-neutral-700 border-neutral-600 cursor-pointer hover:border-neutral-500 transition-colors ${
-                          selectedDoc?.id === doc.id ? "border-neutral-400" : ""
-                        }`}
-                        onClick={() => handleDocClick(doc)}
-                      >
-                        <CardContent className="p-3">
-                          <div className="flex items-center gap-2 mb-1">
-                            <FileText className="w-4 h-4 text-sky-400" />
-                            <span className="text-sm font-medium text-neutral-100">
-                              {doc.title}
-                            </span>
-                            <Badge variant="outline" className="text-xs border-neutral-600 text-neutral-400">
-                              {doc.chunk_count} chunks
-                            </Badge>
-                            {doc.source_type && (
-                              <Badge variant="outline" className="text-xs border-neutral-600 text-neutral-400">
-                                {doc.source_type}
-                              </Badge>
-                            )}
-                            <span className="text-xs text-neutral-500 ml-auto">
-                              {timeAgo(doc.created_at)}
-                            </span>
-                            <Button
-                              variant="ghost"
-                              size="icon"
-                              className="h-6 w-6 text-neutral-500 hover:text-red-400"
-                              onClick={(e) => handleDeleteDocument(e, doc.id, doc.title)}
-                              title="Delete document"
-                            >
-                              <Trash2 className="w-3.5 h-3.5" />
-                            </Button>
-                            {selectedDoc?.id === doc.id
-                              ? <ChevronDown className="w-4 h-4 text-neutral-400" />
-                              : <ChevronRight className="w-4 h-4 text-neutral-400" />}
-                          </div>
-                          {doc.source && (
-                            <p className="text-xs text-neutral-500 mb-1 truncate">{doc.source}</p>
-                          )}
+                <div className="space-y-3">
+                  {/* Source type filter */}
+                  {sourceTypes.length > 0 && (
+                    <div className="flex items-center gap-3">
+                      <span className="text-xs text-neutral-400">Filter by type:</span>
+                      <Select value={sourceTypeFilter} onValueChange={setSourceTypeFilter}>
+                        <SelectTrigger className="w-44 bg-neutral-700 border-neutral-600 text-neutral-200 h-8 text-xs">
+                          <SelectValue placeholder="All types" />
+                        </SelectTrigger>
+                        <SelectContent className="bg-neutral-800 border-neutral-600">
+                          <SelectItem value="all" className="text-neutral-200">All Types</SelectItem>
+                          {sourceTypes.map((st) => (
+                            <SelectItem key={st} value={st} className="text-neutral-200">
+                              {st}
+                            </SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                    </div>
+                  )}
 
-                          {/* Expanded: full content + chunks */}
-                          {selectedDoc?.id === doc.id && selectedDoc && (
-                            <div className="mt-3 pt-3 border-t border-neutral-600">
-                              <div className="mb-3">
-                                <p className="text-xs text-neutral-500 mb-1">Full Document:</p>
-                                <div className="text-sm text-neutral-200 max-h-64 overflow-y-auto whitespace-pre-wrap bg-neutral-800 rounded p-2">
-                                  {selectedDoc.content_full}
-                                </div>
-                              </div>
-                              {selectedDoc.chunks.length > 0 && (
-                                <div>
-                                  <p className="text-xs text-neutral-500 mb-1">
-                                    Chunks ({selectedDoc.chunks.length}):
-                                  </p>
-                                  <div className="grid gap-1">
-                                    {selectedDoc.chunks.map((chunk, i) => (
-                                      <div
-                                        key={chunk.id}
-                                        className="text-xs text-neutral-300 bg-neutral-800 rounded p-2 cursor-pointer hover:bg-neutral-750 transition-colors"
-                                        onClick={(e) => {
-                                          e.stopPropagation();
-                                          setSelectedChunkId(selectedChunkId === chunk.id ? null : chunk.id);
-                                        }}
-                                      >
-                                        <div className="flex items-start gap-2">
-                                          <span className="text-neutral-500 shrink-0">#{i + 1}</span>
-                                          <span className="flex-1">
-                                            {selectedChunkId === chunk.id
-                                              ? chunk.content
-                                              : truncate(chunk.content, 150)}
-                                          </span>
-                                          <span className="text-neutral-600 shrink-0">
-                                            {selectedChunkId === chunk.id ? "▲" : "▼"}
-                                          </span>
-                                        </div>
-                                        {selectedChunkId === chunk.id && Object.keys(chunk.metadata).length > 0 && (
-                                          <div className="mt-2 pt-2 border-t border-neutral-700">
-                                            <pre className="text-xs text-neutral-400 whitespace-pre-wrap break-all">
-                                              {JSON.stringify(chunk.metadata, null, 2)}
-                                            </pre>
-                                          </div>
-                                        )}
-                                      </div>
-                                    ))}
+                  {/* Bulk actions bar */}
+                  {filteredDocuments.length > 0 && (
+                    <div className="flex items-center gap-2 p-2 bg-neutral-800 rounded border border-neutral-700">
+                      <input
+                        type="checkbox"
+                        checked={selectedDocs.size === filteredDocuments.length && filteredDocuments.length > 0}
+                        onChange={(e) => {
+                          if (e.target.checked) {
+                            setSelectedDocs(new Set(filteredDocuments.map((d) => d.id)));
+                          } else {
+                            setSelectedDocs(new Set());
+                          }
+                        }}
+                        className="rounded"
+                      />
+                      <span className="text-xs text-neutral-400">
+                        {selectedDocs.size > 0
+                          ? `${selectedDocs.size} selected`
+                          : `${filteredDocuments.length} documents`}
+                      </span>
+                      {selectedDocs.size > 0 && (
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          className="border-red-600 text-red-400 ml-auto"
+                          onClick={handleBulkDeleteDocs}
+                        >
+                          <Trash2 className="w-3.5 h-3.5 mr-1" />
+                          Delete Selected
+                        </Button>
+                      )}
+                    </div>
+                  )}
+
+                  {filteredDocuments.length === 0 ? (
+                    <div className="text-center text-neutral-500 py-12">
+                      {documents.length === 0 ? "No documents found." : "No documents match the current filter."}
+                    </div>
+                  ) : (
+                    <div className="grid gap-2">
+                      {filteredDocuments.map((doc) => (
+                        <Card
+                          key={doc.id}
+                          className={`bg-neutral-700 border-neutral-600 cursor-pointer hover:border-neutral-500 transition-colors ${
+                            selectedDoc?.id === doc.id ? "border-neutral-400" : ""
+                          }`}
+                          onClick={() => handleDocClick(doc)}
+                        >
+                          <CardContent className="p-3">
+                            <div className="flex items-center gap-2 mb-1">
+                              <input
+                                type="checkbox"
+                                checked={selectedDocs.has(doc.id)}
+                                onChange={(e) => {
+                                  e.stopPropagation();
+                                  toggleDocSelection(doc.id);
+                                }}
+                                onClick={(e) => e.stopPropagation()}
+                                className="rounded shrink-0"
+                              />
+                              <FileText className="w-4 h-4 text-sky-400" />
+                              <span className="text-sm font-medium text-neutral-100">
+                                {doc.title}
+                              </span>
+                              <Badge variant="outline" className="text-xs border-neutral-600 text-neutral-400">
+                                {doc.chunk_count} chunks
+                              </Badge>
+                              {doc.source_type && (
+                                <Badge variant="outline" className="text-xs border-neutral-600 text-neutral-400">
+                                  {doc.source_type}
+                                </Badge>
+                              )}
+                              <span className="text-xs text-neutral-500 ml-auto">
+                                {timeAgo(doc.created_at)}
+                              </span>
+                              <Button
+                                variant="ghost"
+                                size="icon"
+                                className="h-6 w-6 text-neutral-500 hover:text-red-400"
+                                onClick={(e) => handleDeleteDocument(e, doc.id, doc.title)}
+                                title="Delete document"
+                              >
+                                <Trash2 className="w-3.5 h-3.5" />
+                              </Button>
+                              {selectedDoc?.id === doc.id
+                                ? <ChevronDown className="w-4 h-4 text-neutral-400" />
+                                : <ChevronRight className="w-4 h-4 text-neutral-400" />}
+                            </div>
+                            {doc.source && (
+                              <p className="text-xs text-neutral-500 mb-1 truncate ml-7">{doc.source}</p>
+                            )}
+
+                            {/* Expanded: full content + chunks */}
+                            {selectedDoc?.id === doc.id && selectedDoc && (
+                              <div className="mt-3 pt-3 border-t border-neutral-600">
+                                <div className="mb-3">
+                                  <p className="text-xs text-neutral-500 mb-1">Full Document:</p>
+                                  <div className="text-sm text-neutral-200 max-h-64 overflow-y-auto whitespace-pre-wrap bg-neutral-800 rounded p-2">
+                                    {selectedDoc.content_full}
                                   </div>
                                 </div>
-                              )}
-                            </div>
-                          )}
-                        </CardContent>
-                      </Card>
-                    ))}
-                  </div>
-                )
+                                {selectedDoc.chunks.length > 0 && (
+                                  <div>
+                                    <p className="text-xs text-neutral-500 mb-1">
+                                      Chunks ({selectedDoc.chunks.length}):
+                                    </p>
+                                    <div className="grid gap-1">
+                                      {selectedDoc.chunks.map((chunk, i) => (
+                                        <div
+                                          key={chunk.id}
+                                          className="text-xs text-neutral-300 bg-neutral-800 rounded p-2 cursor-pointer hover:bg-neutral-750 transition-colors"
+                                          onClick={(e) => {
+                                            e.stopPropagation();
+                                            setSelectedChunkId(selectedChunkId === chunk.id ? null : chunk.id);
+                                          }}
+                                        >
+                                          <div className="flex items-start gap-2">
+                                            <span className="text-neutral-500 shrink-0">#{i + 1}</span>
+                                            <span className="flex-1">
+                                              {selectedChunkId === chunk.id
+                                                ? chunk.content
+                                                : truncate(chunk.content, 150)}
+                                            </span>
+                                            <span className="text-neutral-600 shrink-0">
+                                              {selectedChunkId === chunk.id ? "\u25B2" : "\u25BC"}
+                                            </span>
+                                          </div>
+                                          {selectedChunkId === chunk.id && Object.keys(chunk.metadata).length > 0 && (
+                                            <div className="mt-2 pt-2 border-t border-neutral-700">
+                                              <pre className="text-xs text-neutral-400 whitespace-pre-wrap break-all">
+                                                {JSON.stringify(chunk.metadata, null, 2)}
+                                              </pre>
+                                            </div>
+                                          )}
+                                        </div>
+                                      ))}
+                                    </div>
+                                  </div>
+                                )}
+                              </div>
+                            )}
+                          </CardContent>
+                        </Card>
+                      ))}
+                    </div>
+                  )}
+                </div>
               ) : activeTab === "recall" ? (
                 recallEntries.length === 0 ? (
                   <div className="text-center text-neutral-500 py-12">No recall entries found.</div>
@@ -700,6 +834,59 @@ export function DocumentLibrary() {
                               ? entry.content
                               : truncate(entry.content, 200)}
                           </p>
+                          {selectedEntry?.id === entry.id && (
+                            <div className="mt-2">
+                              <Button
+                                variant="ghost"
+                                size="sm"
+                                className="text-xs text-neutral-400 hover:text-neutral-200 h-6"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  if (showRecallVersionsFor === entry.id) {
+                                    setShowRecallVersionsFor(null);
+                                    setRecallVersions([]);
+                                  } else {
+                                    fetchRecallVersions(entry.id);
+                                  }
+                                }}
+                              >
+                                <History className="w-3 h-3 mr-1" />
+                                {showRecallVersionsFor === entry.id ? "Hide History" : "Version History"}
+                              </Button>
+                              {showRecallVersionsFor === entry.id && recallVersions.length > 0 && (
+                                <div className="mt-2 space-y-1 border-t border-neutral-600 pt-2">
+                                  {recallVersions.map((v) => (
+                                    <div key={v.version_id} className="flex items-center gap-2 text-xs text-neutral-400 bg-neutral-800 rounded p-1.5">
+                                      <span className="text-neutral-300 font-mono">v{v.version_number}</span>
+                                      <Badge variant="outline" className={`text-[10px] px-1 py-0 ${
+                                        v.change_type === "delete"
+                                          ? "border-red-600 text-red-400"
+                                          : "border-neutral-600 text-neutral-400"
+                                      }`}>
+                                        {v.change_type}
+                                      </Badge>
+                                      <span className="flex-1 truncate">{truncate(v.content, 60)}</span>
+                                      <span className="text-neutral-500">{v.changed_by}</span>
+                                      <Button
+                                        variant="ghost"
+                                        size="sm"
+                                        className="h-5 text-[10px] text-amber-400 hover:text-amber-300"
+                                        onClick={(e) => {
+                                          e.stopPropagation();
+                                          handleRecallRollback(entry.id, v.version_number);
+                                        }}
+                                      >
+                                        Restore
+                                      </Button>
+                                    </div>
+                                  ))}
+                                </div>
+                              )}
+                              {showRecallVersionsFor === entry.id && recallVersions.length === 0 && (
+                                <p className="text-xs text-neutral-500 mt-1">No version history.</p>
+                              )}
+                            </div>
+                          )}
                         </CardContent>
                       </Card>
                     ))}
@@ -936,8 +1123,7 @@ export function DocumentLibrary() {
                           <span className="text-xs text-neutral-500 ml-auto">
                             {timeAgo(entry.created_at)}
                           </span>
-                          {activeTab === "manual" && (
-                            <Button
+                          <Button
                               variant="ghost"
                               size="icon"
                               className="h-6 w-6 text-neutral-500 hover:text-amber-400"
@@ -946,7 +1132,6 @@ export function DocumentLibrary() {
                             >
                               <Pencil className="w-3.5 h-3.5" />
                             </Button>
-                          )}
                           <Button
                             variant="ghost"
                             size="icon"
@@ -1135,7 +1320,9 @@ export function DocumentLibrary() {
           </div>
 
           <div className="text-xs text-neutral-500 mt-1">
-            {activeTab === "ingested" ? `${documents.length} documents` : `${total} entries`}
+            {activeTab === "ingested"
+              ? `${filteredDocuments.length} documents${sourceTypeFilter !== "all" ? ` (filtered from ${documents.length})` : ""}`
+              : `${total} entries`}
           </div>
         </Tabs>
       </div>
@@ -1146,7 +1333,7 @@ export function DocumentLibrary() {
           <div className="bg-neutral-800 rounded-lg p-4 max-w-2xl w-full mx-4 max-h-[80vh] overflow-y-auto" onClick={(e) => e.stopPropagation()}>
             <div className="flex items-center justify-between mb-3">
               <h3 className="text-sm font-medium text-neutral-200">
-                Version Diff: v{versionDiff.v1} → v{versionDiff.v2}
+                Version Diff: v{versionDiff.v1} {"\u2192"} v{versionDiff.v2}
               </h3>
               <Button variant="ghost" size="sm" onClick={() => setVersionDiff(null)} className="text-neutral-400">
                 Close

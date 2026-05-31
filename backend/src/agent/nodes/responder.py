@@ -14,7 +14,7 @@ from agent.configuration import Configuration
 from agent.db import save_to_recall
 from agent.memory.core_memory import CoreMemory
 from agent.memory.tools import create_memory_tools
-from agent.prompts import ANSWER_PROMPT, SYSTEM_PROMPT, get_current_date
+from agent.prompts import ANSWER_PROMPT, SUMMARIZE_HISTORY_PROMPT, SYSTEM_PROMPT, get_current_date
 from agent.state import AgentState
 from agent.utils import get_llm
 
@@ -86,6 +86,40 @@ async def respond(state: AgentState, config: RunnableConfig) -> dict:
     archival_context = _format_archival_results(archival_results)
     recall_context = _format_recall_results(recall_results)
 
+    # --- Conversation summarization ---
+    existing_summary = state.get("conversation_summary", "")
+    messages_list = list(state["messages"])
+    new_summary = ""
+
+    if (
+        configurable.summarize_threshold > 0
+        and len(messages_list) > configurable.summarize_threshold
+    ):
+        keep = configurable.summarize_keep_recent
+        old_messages = messages_list[:-keep]
+        if old_messages:
+            # Build text from old messages
+            history_parts = []
+            for m in old_messages:
+                if isinstance(m, HumanMessage):
+                    history_parts.append(f"User: {m.content[:500]}")
+                elif isinstance(m, AIMessage) and m.content:
+                    history_parts.append(f"Assistant: {m.content[:500]}")
+            old_history = "\n".join(history_parts)
+            if existing_summary:
+                old_history = f"Previous summary: {existing_summary}\n\nNew messages:\n{old_history}"
+            try:
+                summarize_llm = get_llm(configurable, temperature=0.2)
+                resp = await summarize_llm.ainvoke(
+                    SUMMARIZE_HISTORY_PROMPT.format(history=old_history)
+                )
+                new_summary = resp.content
+            except Exception as e:
+                print(f"[responder] Summarization failed: {e}", file=sys.stderr)
+                new_summary = existing_summary
+    elif existing_summary:
+        new_summary = existing_summary
+
     if state.get("mode") == "research" and summaries:
         research_topic = ""
         for msg in reversed(state["messages"]):
@@ -103,6 +137,12 @@ async def respond(state: AgentState, config: RunnableConfig) -> dict:
         ]
     else:
         messages_for_llm = [{"role": "system", "content": system}]
+        # Include conversation summary as context if available
+        if new_summary:
+            messages_for_llm.append({
+                "role": "user",
+                "content": f"[Conversation Summary]\n{new_summary}",
+            })
         for msg in state["messages"][-20:]:
             if isinstance(msg, HumanMessage):
                 content = msg.content
@@ -234,6 +274,7 @@ async def respond(state: AgentState, config: RunnableConfig) -> dict:
     result = {
         "messages": [AIMessage(content=response_text)],
         "core_memory": core_memory.to_dict_with_history(),
+        "conversation_summary": new_summary,
     }
     return result
 
