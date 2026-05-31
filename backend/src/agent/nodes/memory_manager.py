@@ -224,10 +224,14 @@ async def recall_memory(state: AgentState, config: RunnableConfig) -> dict:
     if (configurable.proactive_memory_enabled
             and mode == "chat"
             and turn_count < configurable.proactive_memory_turns):
-        archival_results_raw, recall_results_raw = await asyncio.gather(
-            asyncio.to_thread(get_recent_archival, 3),
-            asyncio.to_thread(get_recent_recall, 3, thread_id=thread_id),
-        )
+        try:
+            archival_results_raw, recall_results_raw = await asyncio.gather(
+                asyncio.to_thread(get_recent_archival, 3),
+                asyncio.to_thread(get_recent_recall, 3, thread_id=thread_id),
+            )
+        except Exception as exc:
+            logger.warning("Proactive memory DB lookup failed, continuing without memory: %s", exc)
+            archival_results_raw, recall_results_raw = [], []
         memory_ops = [{
             "type": "proactive_recall",
             "turn_count": turn_count,
@@ -279,9 +283,13 @@ async def recall_memory(state: AgentState, config: RunnableConfig) -> dict:
         mmr_lambda=configurable.mmr_lambda,
     )
     recall_task = asyncio.to_thread(search_recall, search_query, retrieval_limit, thread_id=thread_id)
-    archival_results_raw, recall_results_raw = await asyncio.gather(
-        archival_task, recall_task
-    )
+    try:
+        archival_results_raw, recall_results_raw = await asyncio.gather(
+            archival_task, recall_task
+        )
+    except Exception as exc:
+        logger.warning("Memory search DB call failed, continuing without memory: %s", exc)
+        archival_results_raw, recall_results_raw = [], []
 
     # Step 3b: Temporal/entity-aware supplementary search
     temporal_ref = _detect_temporal_ref(search_query)
