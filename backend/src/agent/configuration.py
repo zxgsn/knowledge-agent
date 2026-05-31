@@ -1,25 +1,33 @@
 from __future__ import annotations
 
 import os
+from functools import lru_cache
 from pathlib import Path
 from typing import Any, Optional
 
 from langchain_core.runnables import RunnableConfig
 from pydantic import BaseModel, Field
 
+# Pre-compute the config path at module load time (synchronous context)
+# to avoid triggering blockbuster's BlockingError on os.getcwd() at runtime.
+_CONFIG_PATH = Path(__file__).resolve().parents[2] / "config.yaml"
 
+
+@lru_cache(maxsize=1)
 def _load_yaml_config() -> dict[str, Any]:
-    """Load feature config from config.yaml (next to backend/)."""
+    """Load feature config from config.yaml (next to backend/).
+
+    Result is cached so the filesystem is only touched once.
+    """
     try:
         import yaml
     except ImportError:
         return {}
 
-    config_path = Path(__file__).resolve().parents[2] / "config.yaml"
-    if not config_path.is_file():
+    if not _CONFIG_PATH.is_file():
         return {}
 
-    with open(config_path, encoding="utf-8") as f:
+    with open(_CONFIG_PATH, encoding="utf-8") as f:
         data = yaml.safe_load(f) or {}
 
     return data.get("features", {})
