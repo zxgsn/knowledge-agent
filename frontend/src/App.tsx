@@ -315,11 +315,24 @@ export default function App() {
 
   // Clear the submission lock when loading finishes (handles the race where
   // the first stream's finally block fires after the second stream starts).
+  // Also add a safety timeout: if isLoading stays true for too long, force-clear.
   useEffect(() => {
     if (!thread.isLoading) {
       submitLockRef.current = false;
     }
   }, [thread.isLoading]);
+
+  // Safety net: if isLoading is true for more than 5 minutes, clear the lock
+  // and surface a timeout error. This prevents permanent UI freezes.
+  useEffect(() => {
+    if (!thread.isLoading) return;
+    const timeout = setTimeout(() => {
+      thread.stop();
+      submitLockRef.current = false;
+      setError("Request timed out. The backend may be unreachable or processing slowly.");
+    }, 5 * 60 * 1000);
+    return () => clearTimeout(timeout);
+  }, [thread.isLoading, thread]);
 
   const handleSubmit = useCallback(
     (submittedInputValue: string, mode: string) => {
@@ -346,10 +359,15 @@ export default function App() {
               id: Date.now().toString(),
             },
           ];
-          thread.submit({
-            messages: newMessages,
-            mode: mode,
-          });
+          thread.submit(
+            { messages: newMessages, mode: mode },
+            {
+              optimisticValues: (prev) => ({
+                ...prev,
+                messages: newMessages,
+              }),
+            }
+          );
         }, 0);
         return;
       }
@@ -367,10 +385,15 @@ export default function App() {
           id: Date.now().toString(),
         },
       ];
-      thread.submit({
-        messages: newMessages,
-        mode: mode,
-      });
+      thread.submit(
+        { messages: newMessages, mode: mode },
+        {
+          optimisticValues: (prev) => ({
+            ...prev,
+            messages: newMessages,
+          }),
+        }
+      );
     },
     [thread]
   );

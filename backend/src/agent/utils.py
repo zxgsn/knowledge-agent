@@ -105,5 +105,8 @@ def get_llm(config, temperature: float = 0.0):
         base_url=config.llm_base_url,
         api_key=config.llm_api_key,
         temperature=temperature,
-        http_async_client=httpx.AsyncClient(proxy=None),
+        http_async_client=httpx.AsyncClient(
+            proxy=None,
+            timeout=httpx.Timeout(60.0, connect=10.0),
+        ),
     )

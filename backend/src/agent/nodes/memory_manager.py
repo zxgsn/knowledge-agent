@@ -6,6 +6,7 @@ import asyncio
 import json
 import re
 
+import httpx
 from langchain_core.callbacks import dispatch_custom_event
 from langchain_core.messages import HumanMessage
 from langchain_core.runnables import RunnableConfig
@@ -31,13 +32,22 @@ from agent.utils import get_llm, parse_json
 
 logger = get_logger(__name__)
 
+# Only retry on transient network/timeout errors, not auth or validation errors
+_TRANSIENT_ERRORS = (
+    ConnectionError,
+    TimeoutError,
+    httpx.ConnectError,
+    httpx.TimeoutException,
+)
+
 
 async def route_intent(state: AgentState, config: RunnableConfig) -> dict:
     """Classify user intent: chat, research, or memory_edit."""
     configurable = Configuration.from_runnable_config(config)
 
     # If mode is already set (e.g. from frontend), keep it
-    if state.get("mode") in ("research", "memory_edit", "ingest"):
+    # This avoids a costly LLM call when the user explicitly selected a mode.
+    if state.get("mode") in ("chat", "research", "memory_edit", "ingest"):
         return {}
 
     llm = get_llm(configurable, temperature=0)
@@ -53,7 +63,9 @@ async def route_intent(state: AgentState, config: RunnableConfig) -> dict:
 
     prompt = ROUTE_INTENT_PROMPT.format(user_message=user_msg)
     try:
-        response = await with_retry(max_retries=2)(llm.ainvoke)(prompt)
+        response = await with_retry(
+            max_retries=2, retryable_exceptions=_TRANSIENT_ERRORS,
+        )(llm.ainvoke)(prompt)
         parsed = parse_json(response.content)
         mode = parsed.get("mode", "chat")
         if mode not in ("chat", "research", "memory_edit", "ingest", "recall"):
@@ -85,7 +97,9 @@ async def _rewrite_query(user_msg: str, messages: list, config: Configuration) -
     )
     try:
         llm = get_llm(config, temperature=0.0)
-        response = await with_retry(max_retries=2)(llm.ainvoke)(prompt)
+        response = await with_retry(
+            max_retries=2, retryable_exceptions=_TRANSIENT_ERRORS,
+        )(llm.ainvoke)(prompt)
         rewritten = response.content.strip().strip('"')
         if rewritten:
             logger.debug("Query rewritten: %s -> %s", user_msg[:60], rewritten[:60])
@@ -106,7 +120,9 @@ async def _generate_hypothetical(query: str, config: Configuration) -> str:
     )
     try:
         llm = get_llm(config, temperature=0.7)
-        response = await with_retry(max_retries=2)(llm.ainvoke)(hyde_prompt)
+        response = await with_retry(
+            max_retries=2, retryable_exceptions=_TRANSIENT_ERRORS,
+        )(llm.ainvoke)(hyde_prompt)
         result = response.content.strip()
         logger.debug("HyDE generated: %s", result[:80])
         return result
@@ -375,7 +391,9 @@ async def evaluate_recall(state: AgentState, config: RunnableConfig) -> dict:
     )
 
     try:
-        response = await with_retry(max_retries=2)(llm.ainvoke)(prompt)
+        response = await with_retry(
+            max_retries=2, retryable_exceptions=_TRANSIENT_ERRORS,
+        )(llm.ainvoke)(prompt)
         parsed = parse_json(response.content)
         is_sufficient = parsed.get("is_sufficient", False)
         reason = parsed.get("reason", "Evaluation completed.")
@@ -420,7 +438,9 @@ async def save_to_archival(state: AgentState, config: RunnableConfig) -> dict:
     )
 
     try:
-        response = await with_retry(max_retries=2)(llm.ainvoke)(prompt)
+        response = await with_retry(
+            max_retries=2, retryable_exceptions=_TRANSIENT_ERRORS,
+        )(llm.ainvoke)(prompt)
     except Exception as exc:
         logger.warning("Archival store LLM failed after retries: %s", exc)
         return {}

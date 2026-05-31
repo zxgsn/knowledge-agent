@@ -263,21 +263,6 @@ export function DocumentLibrary() {
     } catch (err) { console.error("Failed to fetch recall versions:", err); }
   }, []);
 
-  const handleRecallRollback = useCallback(async (entryId: string, versionNumber: number) => {
-    if (!window.confirm(`Rollback recall entry to version ${versionNumber}?`)) return;
-    try {
-      const res = await fetch(
-        `${API_BASE}/api/recall/entries/${entryId}/rollback?version_number=${versionNumber}`,
-        { method: "POST" }
-      );
-      if (res.ok) {
-        setShowRecallVersionsFor(null);
-        setRecallVersions([]);
-        handleRefresh();
-      }
-    } catch (err) { console.error("Failed to rollback recall entry:", err); }
-  }, [handleRefresh]);
-
   const fetchConflicts = useCallback(async () => {
     try {
       const res = await fetch(`${API_BASE}/api/conflicts?limit=50`);
@@ -295,6 +280,21 @@ export function DocumentLibrary() {
       fetchEntries();
     }
   }, [activeTab, fetchStats, fetchDocuments, fetchEntries, fetchConflicts]);
+
+  const handleRecallRollback = useCallback(async (entryId: string, versionNumber: number) => {
+    if (!window.confirm(`Rollback recall entry to version ${versionNumber}?`)) return;
+    try {
+      const res = await fetch(
+        `${API_BASE}/api/recall/entries/${entryId}/rollback?version_number=${versionNumber}`,
+        { method: "POST" }
+      );
+      if (res.ok) {
+        setShowRecallVersionsFor(null);
+        setRecallVersions([]);
+        handleRefresh();
+      }
+    } catch (err) { console.error("Failed to rollback recall entry:", err); }
+  }, [handleRefresh]);
 
   const handleRollback = useCallback(async (entryId: string, versionNumber: number) => {
     if (!window.confirm(`Rollback to version ${versionNumber}?`)) return;
