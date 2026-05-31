@@ -75,8 +75,8 @@ def route_after_intent(state: AgentState, config: RunnableConfig) -> str:
                 user_msg = msg.content.strip()
                 break
 
-        # Short messages (< 10 chars) are casual — no memory needed
-        is_short = len(user_msg) < 10
+        # Short messages (< 30 chars) are casual — no memory needed
+        is_short = len(user_msg) < 30
 
         if (configurable.proactive_memory_enabled
                 and turn_count < configurable.proactive_memory_turns
