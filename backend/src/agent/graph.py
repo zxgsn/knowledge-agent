@@ -57,15 +57,30 @@ load_dotenv()
 
 def route_after_intent(state: AgentState, config: RunnableConfig) -> str:
     """Route to the appropriate sub-graph based on intent."""
+    from langchain_core.messages import HumanMessage
+
     mode = state.get("mode", "chat")
     if mode == "ingest":
         return "ingest_document"
     if mode in ("chat", "memory_edit") or not state.get("need_recall", True):
         # Proactive memory: route early chat turns through recall_memory
+        # but skip for short/simple messages (greetings, test, etc.)
         configurable = Configuration.from_runnable_config(config)
         turn_count = state.get("turn_count", 0)
+
+        # Extract the latest user message
+        user_msg = ""
+        for msg in reversed(state["messages"]):
+            if isinstance(msg, HumanMessage):
+                user_msg = msg.content.strip()
+                break
+
+        # Short messages (< 10 chars) are casual — no memory needed
+        is_short = len(user_msg) < 10
+
         if (configurable.proactive_memory_enabled
-                and turn_count < configurable.proactive_memory_turns):
+                and turn_count < configurable.proactive_memory_turns
+                and not is_short):
             return "recall_memory"
         return "respond"
     return "recall_memory"
