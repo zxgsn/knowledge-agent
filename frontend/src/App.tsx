@@ -30,6 +30,14 @@ export default function App() {
   const [currentThreadId, setCurrentThreadId] = useState<string | null>(null);
   const [coreMemoryRefreshKey, setCoreMemoryRefreshKey] = useState(0);
   const submitLockRef = useRef(false);
+  const pendingMsgRef = useRef<{ value: string; mode: string } | null>(null);
+  const [pendingMessageText, setPendingMessageText] = useState<string | null>(null);
+  // Persisted message list — useStream's thread.messages can become empty during
+  // stream transitions (new stream starts before backend responds), which would
+  // flash the WelcomeScreen. We maintain our own copy that only updates when the
+  // hook returns a non-empty array.
+  const [displayMessages, setDisplayMessages] = useState<Message[]>([]);
+  const prevThreadIdRef = useRef<string | null>(null);
   const thread = useStream<{
     messages: Message[];
     core_memory: Record<string, string>;
@@ -282,6 +290,23 @@ export default function App() {
     },
   });
 
+  // Sync displayMessages: only update when useStream returns non-empty messages.
+  // This prevents the WelcomeScreen flash when useStream briefly returns []
+  // during a stream transition.
+  useEffect(() => {
+    if (thread.messages.length > 0) {
+      setDisplayMessages(thread.messages);
+    }
+  }, [thread.messages]);
+
+  // Reset displayMessages when switching to a different thread
+  useEffect(() => {
+    if (currentThreadId !== prevThreadIdRef.current) {
+      prevThreadIdRef.current = currentThreadId;
+      setDisplayMessages([]);
+    }
+  }, [currentThreadId]);
+
   useEffect(() => {
     if (scrollAreaRef.current) {
       const scrollViewport = scrollAreaRef.current.querySelector(
@@ -291,15 +316,15 @@ export default function App() {
         scrollViewport.scrollTop = scrollViewport.scrollHeight;
       }
     }
-  }, [thread.messages]);
+  }, [displayMessages]);
 
   useEffect(() => {
     if (
       hasFinalizeEventOccurredRef.current &&
       !thread.isLoading &&
-      thread.messages.length > 0
+      displayMessages.length > 0
     ) {
-      const lastMessage = thread.messages[thread.messages.length - 1];
+      const lastMessage = displayMessages[displayMessages.length - 1];
       if (lastMessage && lastMessage.type === "ai" && lastMessage.id) {
         setHistoricalActivities((prev) => ({
           ...prev,
@@ -309,7 +334,7 @@ export default function App() {
       hasFinalizeEventOccurredRef.current = false;
       setCoreMemoryRefreshKey((k) => k + 1);
     }
-  }, [thread.messages, thread.isLoading, processedEventsTimeline]);
+  }, [displayMessages, thread.isLoading, processedEventsTimeline]);
 
   // Clear the submission lock when loading finishes (handles the race where
   // the first stream's finally block fires after the second stream starts).
@@ -337,36 +362,12 @@ export default function App() {
       if (!submittedInputValue.trim()) return;
       if (submitLockRef.current) return;
 
-      // Cancel any in-progress run before submitting a new one
+      // If a stream is in progress, queue the message instead of interrupting.
+      // Interrupting via thread.stop() + immediate thread.submit() can cause
+      // useStream to lose accumulated messages, resetting the page to blank.
       if (thread.isLoading) {
-        thread.stop();
-        // Wait one tick for the aborted stream's finally block to execute
-        // before starting a new stream, preventing the stale finally from
-        // corrupting the new stream's shared state.
-        setTimeout(() => {
-          submitLockRef.current = true;
-          setProcessedEventsTimeline([]);
-          setError(null);
-          hasFinalizeEventOccurredRef.current = false;
-
-          const newMessages: Message[] = [
-            ...(thread.messages || []),
-            {
-              type: "human",
-              content: submittedInputValue,
-              id: Date.now().toString(),
-            },
-          ];
-          thread.submit(
-            { messages: newMessages, mode: mode },
-            {
-              optimisticValues: (prev) => ({
-                ...prev,
-                messages: newMessages,
-              }),
-            }
-          );
-        }, 0);
+        pendingMsgRef.current = { value: submittedInputValue, mode };
+        setPendingMessageText(submittedInputValue);
         return;
       }
 
@@ -376,7 +377,7 @@ export default function App() {
       hasFinalizeEventOccurredRef.current = false;
 
       const newMessages: Message[] = [
-        ...(thread.messages || []),
+        ...displayMessages,
         {
           type: "human",
           content: submittedInputValue,
@@ -393,10 +394,40 @@ export default function App() {
         }
       );
     },
-    [thread]
+    [thread, displayMessages]
   );
 
+  // Submit queued message once the current stream finishes
+  useEffect(() => {
+    if (!thread.isLoading && pendingMsgRef.current && !submitLockRef.current) {
+      const { value, mode } = pendingMsgRef.current;
+      pendingMsgRef.current = null;
+      setPendingMessageText(null);
+
+      submitLockRef.current = true;
+      setProcessedEventsTimeline([]);
+      setError(null);
+      hasFinalizeEventOccurredRef.current = false;
+
+      const newMessages: Message[] = [
+        ...displayMessages,
+        { type: "human", content: value, id: Date.now().toString() },
+      ];
+      thread.submit(
+        { messages: newMessages, mode },
+        {
+          optimisticValues: (prev) => ({
+            ...prev,
+            messages: newMessages,
+          }),
+        }
+      );
+    }
+  }, [thread.isLoading, displayMessages, thread.submit]);
+
   const handleCancel = useCallback(() => {
+    pendingMsgRef.current = null;
+    setPendingMessageText(null);
     thread.stop();
   }, [thread]);
 
@@ -502,7 +533,7 @@ export default function App() {
                 threadId={currentThreadId}
                 refreshKey={coreMemoryRefreshKey}
               />
-            <main className="h-full flex-1 max-w-4xl mx-auto">
+            <main className="h-full flex-1 max-w-4xl mx-auto overflow-hidden">
               {error ? (
                 <div className="flex flex-col items-center justify-center h-full">
                   <div className="flex flex-col items-center justify-center gap-4">
@@ -516,22 +547,32 @@ export default function App() {
                     </Button>
                   </div>
                 </div>
-              ) : thread.messages.length === 0 ? (
+              ) : displayMessages.length === 0 ? (
                 <WelcomeScreen
                   handleSubmit={handleSubmit}
                   isLoading={thread.isLoading}
                   onCancel={handleCancel}
                 />
               ) : (
-                <ChatMessagesView
-                  messages={thread.messages}
-                  isLoading={thread.isLoading}
-                  scrollAreaRef={scrollAreaRef}
-                  onSubmit={handleSubmit}
-                  onCancel={handleCancel}
-                  liveActivityEvents={processedEventsTimeline}
-                  historicalActivities={historicalActivities}
-                />
+                <>
+                  <ChatMessagesView
+                    messages={displayMessages}
+                    isLoading={thread.isLoading}
+                    scrollAreaRef={scrollAreaRef}
+                    onSubmit={handleSubmit}
+                    onCancel={handleCancel}
+                    liveActivityEvents={processedEventsTimeline}
+                    historicalActivities={historicalActivities}
+                  />
+                  {pendingMessageText && (
+                    <div className="mx-auto max-w-4xl px-4 pb-1">
+                      <div className="flex items-center gap-2 px-3 py-1.5 bg-amber-900/30 border border-amber-700/50 rounded-lg text-xs text-amber-300">
+                        <span className="inline-block w-1.5 h-1.5 bg-amber-400 rounded-full animate-pulse" />
+                        <span className="truncate">Queued: {pendingMessageText}</span>
+                      </div>
+                    </div>
+                  )}
+                </>
               )}
             </main>
             </div>

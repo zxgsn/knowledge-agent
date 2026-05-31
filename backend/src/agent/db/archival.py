@@ -63,6 +63,7 @@ def search_archival(
                        AS score
                 FROM archival_memory
                 WHERE status = 'active' AND 1 - (embedding <=> %s::vector) > 0.15
+                  AND namespace NOT LIKE 'locomo%'
                 ORDER BY score DESC
                 LIMIT %s
                 """,
@@ -370,7 +371,7 @@ def get_recent_archival(limit: int = 5) -> list[dict]:
         with get_conn() as conn:
             rows = conn.execute(
                 "SELECT content, metadata FROM archival_memory "
-                "WHERE status = 'active' "
+                "WHERE status = 'active' AND namespace NOT LIKE 'locomo%' "
                 "ORDER BY created_at DESC LIMIT %s",
                 (int(limit),),
             ).fetchall()

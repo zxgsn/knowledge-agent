@@ -941,7 +941,7 @@ export function DocumentLibrary() {
                             />
                             <AlertTriangle className="w-4 h-4 text-amber-400" />
                             <span className="text-xs text-neutral-400">
-                              Similarity: {(conflict.similarity_score * 100).toFixed(0)}%
+                              Similarity: {conflict.similarity_score.toFixed(3)}
                             </span>
                             {conflict.llm_confidence !== null && (
                               <Badge variant="outline" className={`text-[10px] px-1 py-0 ${

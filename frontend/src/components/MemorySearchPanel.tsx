@@ -19,9 +19,10 @@ interface SearchResult {
   id: string;
   content: string;
   namespace: string;
-  importance: number;
+  score: number;
+  cosine_score: number;
+  importance_score: number;
   created_at: string | null;
-  similarity: number;
   metadata: Record<string, any>;
 }
 
@@ -123,8 +124,8 @@ export function MemorySearchPanel() {
         // Client-side sort for now (server may not support sort params)
         const sorted = [...data.results].sort((a, b) => {
           let cmp = 0;
-          if (sortField === "relevance") cmp = a.similarity - b.similarity;
-          else if (sortField === "importance") cmp = a.importance - b.importance;
+          if (sortField === "relevance") cmp = a.cosine_score - b.cosine_score;
+          else if (sortField === "importance") cmp = a.importance_score - b.importance_score;
           else if (sortField === "date") {
             const da = a.created_at ? new Date(a.created_at).getTime() : 0;
             const db = b.created_at ? new Date(b.created_at).getTime() : 0;
@@ -169,8 +170,8 @@ export function MemorySearchPanel() {
     setResults((prev) => {
       const sorted = [...prev].sort((a, b) => {
         let cmp = 0;
-        if (sortField === "relevance") cmp = a.similarity - b.similarity;
-        else if (sortField === "importance") cmp = a.importance - b.importance;
+        if (sortField === "relevance") cmp = a.cosine_score - b.cosine_score;
+        else if (sortField === "importance") cmp = a.importance_score - b.importance_score;
         else if (sortField === "date") {
           const da = a.created_at ? new Date(a.created_at).getTime() : 0;
           const db = b.created_at ? new Date(b.created_at).getTime() : 0;
@@ -333,18 +334,18 @@ export function MemorySearchPanel() {
                   <div className="flex items-center gap-1.5">
                     <div className="w-16 h-1.5 bg-neutral-800 rounded-full overflow-hidden">
                       <div
-                        className={`h-full rounded-full ${getImportanceColor(result.importance)}`}
-                        style={{ width: `${result.importance * 100}%` }}
+                        className={`h-full rounded-full ${getImportanceColor(result.importance_score)}`}
+                        style={{ width: `${result.importance_score * 100}%` }}
                       />
                     </div>
                     <span className="text-[10px] text-neutral-500">
-                      {(result.importance * 100).toFixed(0)}%
+                      {(result.importance_score * 100).toFixed(0)}%
                     </span>
                   </div>
 
                   {/* Similarity */}
                   <Badge variant="outline" className="text-[10px] px-1.5 py-0 border-neutral-600 text-neutral-400">
-                    {(result.similarity * 100).toFixed(0)}% match
+                    sim: {result.cosine_score.toFixed(3)}
                   </Badge>
 
                   <span className="text-xs text-neutral-500 ml-auto">
@@ -373,10 +374,13 @@ export function MemorySearchPanel() {
                         ID: <span className="text-neutral-400 font-mono">{result.id}</span>
                       </div>
                       <div className="text-neutral-500">
-                        Importance: <span className="text-neutral-400">{result.importance.toFixed(3)}</span>
+                        Importance: <span className="text-neutral-400">{result.importance_score.toFixed(3)}</span>
                       </div>
                       <div className="text-neutral-500">
-                        Similarity: <span className="text-neutral-400">{result.similarity.toFixed(4)}</span>
+                        Cosine Similarity: <span className="text-neutral-400">{result.cosine_score.toFixed(4)}</span>
+                      </div>
+                      <div className="text-neutral-500">
+                        Weighted Score: <span className="text-neutral-400">{result.score.toFixed(4)}</span>
                       </div>
                       <div className="text-neutral-500">
                         Created: <span className="text-neutral-400">{result.created_at || "N/A"}</span>

@@ -128,7 +128,7 @@ export const InputForm: React.FC<InputFormProps> = ({
   return (
     <form
       onSubmit={handleInternalSubmit}
-      className="relative flex flex-col gap-2 p-3 pb-4"
+      className="relative flex flex-col gap-2 p-3 pb-2"
       onDragEnter={handleDragEnter}
       onDragLeave={handleDragLeave}
       onDragOver={handleDragOver}

@@ -263,7 +263,7 @@ const MemoryBadge: React.FC<{ memoryText: string }> = ({ memoryText }) => {
                 {item.preview}
               </span>
               <span className="shrink-0 text-neutral-500 tabular-nums">
-                {(item.score * 100).toFixed(0)}%
+                {item.score.toFixed(3)}
               </span>
               {item.used && (
                 <span className="shrink-0 text-emerald-400 text-sm font-bold">✓</span>

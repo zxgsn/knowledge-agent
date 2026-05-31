@@ -170,7 +170,8 @@ def search_importance_weighted(
                            1 - (embedding <=> %s::vector) AS cosine_score,
                            COALESCE(importance_score, 0.5) AS imp_score,
                            {w_sim} * (1 - (embedding <=> %s::vector))
-                           + {w_imp} * COALESCE(importance_score, 0.5) AS weighted_score
+                           + {w_imp} * COALESCE(importance_score, 0.5) AS weighted_score,
+                           created_at::text
                     FROM archival_memory
                     WHERE namespace = %s AND status = 'active'
                       AND 1 - (embedding <=> %s::vector) > 0.15
@@ -186,7 +187,8 @@ def search_importance_weighted(
                            1 - (embedding <=> %s::vector) AS cosine_score,
                            COALESCE(importance_score, 0.5) AS imp_score,
                            {w_sim} * (1 - (embedding <=> %s::vector))
-                           + {w_imp} * COALESCE(importance_score, 0.5) AS weighted_score
+                           + {w_imp} * COALESCE(importance_score, 0.5) AS weighted_score,
+                           created_at::text
                     FROM archival_memory
                     WHERE namespace NOT LIKE %s AND status = 'active'
                       AND 1 - (embedding <=> %s::vector) > 0.15
@@ -212,6 +214,7 @@ def search_importance_weighted(
             "score": round(float(row[6]), 4),
             "cosine_score": round(cosine, 4),
             "importance_score": round(imp, 4),
+            "created_at": row[7],
         })
     return results
 

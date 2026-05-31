@@ -81,36 +81,46 @@ export function ThreadSidebar({
         sortOrder: "desc",
       });
 
-      // Filter candidates with valid messages
-      const candidates: { thread: Thread; threadId: string }[] = [];
-      for (const t of threadList as any[]) {
-        const msgs = t.values?.messages;
-        if (!Array.isArray(msgs) || msgs.length === 0) continue;
-        if (!msgs.some((m: any) => m.type === "ai")) continue;
-        const firstHuman = msgs.find((m: any) => m.type === "human");
-        candidates.push({
-          thread: {
-            thread_id: t.thread_id,
-            created_at: t.created_at || t.metadata?.created_at || "",
-            first_message: firstHuman?.content || "",
-          },
-          threadId: t.thread_id,
+      // Build base thread list from search metadata (instant, no extra API calls)
+      const baseThreads: Thread[] = (threadList as any[]).map((t) => ({
+        thread_id: t.thread_id,
+        created_at: t.created_at || t.metadata?.created_at || "",
+        first_message: "",
+      }));
+
+      // Show threads immediately with empty previews
+      baseThreads.sort((a, b) => (b.created_at > a.created_at ? 1 : -1));
+      setThreads(baseThreads);
+
+      // Then fetch first message previews in parallel (best-effort)
+      const BATCH_SIZE = 5;
+      for (let i = 0; i < baseThreads.length; i += BATCH_SIZE) {
+        const batch = baseThreads.slice(i, i + BATCH_SIZE);
+        const results = await Promise.allSettled(
+          batch.map(async (t) => {
+            const hist = await client.threads.getHistory(t.thread_id, { limit: 1 });
+            const state = hist?.[0]?.values as Record<string, any> | undefined;
+            const msgs = state?.messages;
+            if (Array.isArray(msgs)) {
+              const firstHuman = msgs.find((m: any) => m.type === "human");
+              return { threadId: t.thread_id, preview: firstHuman?.content || "" };
+            }
+            return null;
+          })
+        );
+        // Update threads with fetched previews
+        setThreads((prev) => {
+          const updated = [...prev];
+          for (const r of results) {
+            if (r.status === "fulfilled" && r.value) {
+              const idx = updated.findIndex((t) => t.thread_id === r.value!.threadId);
+              if (idx >= 0) updated[idx] = { ...updated[idx], first_message: r.value!.preview };
+            }
+          }
+          return updated;
         });
       }
 
-      // Verify checkpoints exist (concurrent)
-      const checks = candidates.map(async ({ thread, threadId }) => {
-        try {
-          const hist = await client.threads.getHistory(threadId, { limit: 1 });
-          return hist.length > 0 ? thread : null;
-        } catch {
-          return null;
-        }
-      });
-      const validThreads = (await Promise.all(checks)).filter(Boolean) as Thread[];
-      validThreads.sort((a, b) => (b.created_at > a.created_at ? 1 : -1));
-
-      setThreads(validThreads);
       hasLoaded.current = true;
     } catch (err) {
       console.error("Failed to fetch threads:", err);

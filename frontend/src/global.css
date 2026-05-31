@@ -119,10 +119,12 @@
     /* Prevent scroll bounce/overscroll on mobile */
     overscroll-behavior: none;
     -webkit-overflow-scrolling: touch;
+    overflow: hidden;
   }
   html {
     /* Prevent scroll bounce on the entire page */
     overscroll-behavior: none;
+    overflow: hidden;
   }
 }
 
@@ -183,5 +185,5 @@
   background-color: rgb(115 115 115 / 0.2) !important;
 }
 
-/* Ensure your body or html has a dark background if not already set, e.g.: */
-/* body { background-color: #0c0c0d; } */ /* This is similar to neutral-950 */
+/* Dark background to match app theme — prevents white flash on load */
+body { background-color: #262626; }

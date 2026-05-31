@@ -934,10 +934,12 @@ class ImportanceSearchResult(BaseModel):
     score: float
     cosine_score: float
     importance_score: float
+    created_at: str | None = None
 
 
 class MemorySearchResponse(BaseModel):
     results: list[ImportanceSearchResult]
+    total: int
     query: str
     namespace: str
 
@@ -1030,6 +1032,7 @@ def advanced_memory_search(
     )
     return MemorySearchResponse(
         results=[ImportanceSearchResult(**r) for r in results],
+        total=len(results),
         query=query,
         namespace=namespace,
     )

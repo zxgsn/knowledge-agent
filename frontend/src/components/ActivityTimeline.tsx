@@ -176,7 +176,7 @@ export function ActivityTimeline({
                                   )}
                                   {item.score > 0 && (
                                     <span className="inline-flex items-center rounded bg-neutral-700 px-1.5 py-0.5 text-[10px] text-neutral-400">
-                                      {(item.score * 100).toFixed(0)}%
+                                      {item.score.toFixed(3)}
                                     </span>
                                   )}
                                   {item.used && (
