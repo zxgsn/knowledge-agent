@@ -45,9 +45,10 @@ async def route_intent(state: AgentState, config: RunnableConfig) -> dict:
     """Classify user intent: chat, research, or memory_edit."""
     configurable = Configuration.from_runnable_config(config)
 
-    # If mode is already set (e.g. from frontend), keep it
-    # This avoids a costly LLM call when the user explicitly selected a mode.
-    if state.get("mode") in ("chat", "research", "memory_edit", "ingest"):
+    # If the user explicitly selected a non-chat mode from the frontend,
+    # keep it and skip the LLM call. For "chat" mode, we still call the
+    # LLM to determine need_recall (whether memory search is useful).
+    if state.get("mode") in ("research", "memory_edit", "ingest"):
         return {}
 
     llm = get_llm(configurable, temperature=0)
