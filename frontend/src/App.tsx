@@ -35,9 +35,7 @@ export default function App() {
     core_memory: Record<string, string>;
     mode: string;
   }>({
-    apiUrl: import.meta.env.DEV
-      ? "http://localhost:8123"
-      : "http://localhost:8123",
+    apiUrl: import.meta.env.VITE_LANGGRAPH_URL || "http://localhost:2024",
     assistantId: "agent",
     messagesKey: "messages",
     threadId: currentThreadId ?? undefined,
