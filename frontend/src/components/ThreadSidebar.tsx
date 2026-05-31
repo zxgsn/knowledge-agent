@@ -3,9 +3,7 @@ import { Button } from "@/components/ui/button";
 import { MessageSquare, Plus, PanelLeftClose, PanelLeft, Trash2, Loader2 } from "lucide-react";
 import { Client } from "@langchain/langgraph-sdk";
 
-const API_URL = import.meta.env.DEV
-  ? "http://localhost:8123"
-  : "http://localhost:8123";
+const API_URL = import.meta.env.VITE_LANGGRAPH_URL || "http://localhost:2024";
 
 interface Thread {
   thread_id: string;
