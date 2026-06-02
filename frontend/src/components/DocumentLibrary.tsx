@@ -159,9 +159,15 @@ export function DocumentLibrary() {
         fetch(`${API_BASE}/api/archival/stats`),
         fetch(`${API_BASE}/api/recall/stats`),
       ]);
-      if (archivalRes.ok) setStats(await archivalRes.json());
-      if (recallRes.ok) setRecallStats(await recallRes.json());
-    } catch (err) { console.error("Failed to fetch stats:", err); }
+      if (archivalRes.ok) {
+        const statsData = await archivalRes.json();
+        setStats(statsData);
+      }
+      if (recallRes.ok) {
+        const recallData = await recallRes.json();
+        setRecallStats(recallData);
+      }
+    } catch (err) { console.error("[DL] fetchStats error:", err); }
   }, []);
 
   const fetchDocuments = useCallback(async () => {
@@ -194,51 +200,70 @@ export function DocumentLibrary() {
       if (activeTab === "recall") {
         const params = new URLSearchParams({ limit: "100", offset: "0" });
         if (search) params.set("search", search);
-        const res = await fetch(`${API_BASE}/api/recall/entries?${params}`);
+        const url = `${API_BASE}/api/recall/entries?${params}`;
+        const res = await fetch(url);
         if (res.ok) {
           const data = await res.json();
-          setRecallEntries(data.entries);
-          setTotal(data.total);
+          setRecallEntries(data.entries || []);
+          setTotal(data.total || 0);
+        } else {
+          setRecallEntries([]);
+          setTotal(0);
         }
         setEntries([]);
         setDocuments([]);
       } else if (activeTab === "all") {
-        // Fetch both archival (filtered) and recall in parallel
         const archParams = new URLSearchParams({ limit: "50", offset: "0", exclude_namespaces: EXCLUDE_NS_PARAM });
         const recParams = new URLSearchParams({ limit: "50", offset: "0" });
         if (search) { archParams.set("search", search); recParams.set("search", search); }
+        const archUrl = `${API_BASE}/api/archival/entries?${archParams}`;
+        const recUrl = `${API_BASE}/api/recall/entries?${recParams}`;
         const [archRes, recRes] = await Promise.all([
-          fetch(`${API_BASE}/api/archival/entries?${archParams}`),
-          fetch(`${API_BASE}/api/recall/entries?${recParams}`),
+          fetch(archUrl),
+          fetch(recUrl),
         ]);
         let archTotal = 0;
+        let archEntries: ArchivalEntry[] = [];
+        let recEntries: RecallEntry[] = [];
         if (archRes.ok) {
           const data = await archRes.json();
-          setEntries(data.entries);
-          archTotal = data.total;
+          archEntries = data.entries || [];
+          archTotal = data.total || 0;
         }
         if (recRes.ok) {
           const data = await recRes.json();
-          setRecallEntries(data.entries);
-          setTotal(archTotal + data.total);
+          recEntries = data.entries || [];
+          setTotal(archTotal + (data.total || 0));
         } else {
           setTotal(archTotal);
         }
+        setEntries(archEntries);
+        setRecallEntries(recEntries);
         setDocuments([]);
       } else {
         const params = new URLSearchParams({ limit: "100", offset: "0" });
         params.set("namespace", activeTab);
         if (search) params.set("search", search);
-        const res = await fetch(`${API_BASE}/api/archival/entries?${params}`);
+        const url = `${API_BASE}/api/archival/entries?${params}`;
+        const res = await fetch(url);
         if (res.ok) {
           const data = await res.json();
-          setEntries(data.entries);
-          setTotal(data.total);
+          setEntries(data.entries || []);
+          setTotal(data.total || 0);
+        } else {
+          setEntries([]);
+          setTotal(0);
         }
         setRecallEntries([]);
         setDocuments([]);
       }
-    } catch (err) { console.error("Failed to fetch entries:", err); }
+    } catch (err) { 
+      console.error("[DL] fetchEntries error:", err);
+      setEntries([]);
+      setRecallEntries([]);
+      setDocuments([]);
+      setTotal(0);
+    }
     setLoading(false);
   }, [activeTab, search]);
 

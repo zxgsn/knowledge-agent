@@ -29,13 +29,15 @@ def _debug_report(hypothesis_id: str, location: str, msg: str, data: dict | None
         "data": data or {},
         "ts": int(time.time() * 1000),
     }
-    debug_url = "http://127.0.0.1:7777/event"
+    debug_url = os.environ.get("DEBUG_SERVER_URL", "http://127.0.0.1:7777/event")
     env_path = os.path.join(".dbg", "frontend-network-error.env")
     try:
         with open(env_path, encoding="utf-8") as env_file:
             for line in env_file:
                 if line.startswith("DEBUG_SERVER_URL="):
-                    debug_url = line.split("=", 1)[1].strip() or debug_url
+                    file_url = line.split("=", 1)[1].strip()
+                    if file_url:
+                        debug_url = file_url
                     break
     except Exception:
         pass
