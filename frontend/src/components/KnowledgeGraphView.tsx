@@ -4,9 +4,10 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Card, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
+import { LIBRARY_API_BASE } from "@/lib/api";
 import { ArrowLeft, GitBranch, Loader2, Search, Minus, Plus, RotateCcw } from "lucide-react";
 
-const API_BASE = import.meta.env.DEV ? "http://localhost:8000" : "";
+const API_BASE = LIBRARY_API_BASE;
 
 interface GraphNode {
   id: string;

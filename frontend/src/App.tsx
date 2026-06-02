@@ -13,8 +13,37 @@ import { CoreMemoryPanel } from "@/components/CoreMemoryPanel";
 import { ThreadSidebar } from "@/components/ThreadSidebar";
 import { Button } from "@/components/ui/button";
 import { NavLink } from "react-router-dom";
+import { LANGGRAPH_API_URL } from "@/lib/api";
 import { cn } from "@/lib/utils";
 import { MessageSquare, BookOpen, BarChart3, Search, Network } from "lucide-react";
+
+const DEBUG_SERVER_URL =
+  import.meta.env.VITE_DEBUG_SERVER_URL || "http://127.0.0.1:7777/event";
+const DEBUG_SESSION_ID = "frontend-network-error";
+const DEBUG_RUN_ID = "pre-fix";
+
+// #region debug-point A:frontend-stream-lifecycle
+function reportDebug(
+  hypothesisId: string,
+  location: string,
+  msg: string,
+  data: Record<string, unknown> = {}
+) {
+  fetch(DEBUG_SERVER_URL, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      sessionId: DEBUG_SESSION_ID,
+      runId: DEBUG_RUN_ID,
+      hypothesisId,
+      location,
+      msg,
+      data,
+      ts: Date.now(),
+    }),
+  }).catch(() => {});
+}
+// #endregion
 
 export default function App() {
   const [processedEventsTimeline, setProcessedEventsTimeline] = useState<
@@ -31,6 +60,7 @@ export default function App() {
   const [coreMemoryRefreshKey, setCoreMemoryRefreshKey] = useState(0);
   const submitLockRef = useRef(false);
   const pendingMsgRef = useRef<{ value: string; mode: string } | null>(null);
+  const currentRunModeRef = useRef<string>("chat");
   const [pendingMessageText, setPendingMessageText] = useState<string | null>(null);
   // Persisted message list — useStream's thread.messages can become empty during
   // stream transitions (new stream starts before backend responds), which would
@@ -43,7 +73,7 @@ export default function App() {
     core_memory: Record<string, string>;
     mode: string;
   }>({
-    apiUrl: import.meta.env.VITE_LANGGRAPH_URL || "http://localhost:2024",
+    apiUrl: LANGGRAPH_API_URL,
     assistantId: "agent",
     messagesKey: "messages",
     threadId: currentThreadId ?? undefined,
@@ -51,6 +81,13 @@ export default function App() {
       const payload = event?.name ? event : event?.data ? event.data : event;
       if (payload?.name === "progress") {
         const { stage, detail } = payload.data || {};
+        // #region debug-point D:progress-events
+        reportDebug("D", "frontend/src/App.tsx:onCustomEvent", "[DEBUG] progress event received", {
+          stage: stage || "",
+          detail: detail || "",
+          threadId: currentThreadId ?? "new",
+        });
+        // #endregion
         const titleMap: Record<string, string> = {
           memory_search: "Searching Memory",
           evaluate_recall: "Evaluating Recall",
@@ -283,6 +320,17 @@ export default function App() {
       // Ignore cancellation errors — these happen when a user interrupts a running stream
       const msg =
         error?.message ?? error?.error ?? (typeof error === "string" ? error : "An error occurred");
+      // #region debug-point A:on-error
+      reportDebug("A", "frontend/src/App.tsx:onError", "[DEBUG] stream error surfaced to UI", {
+        message: msg,
+        rawError:
+          error instanceof Error
+            ? { name: error.name, message: error.message, stack: error.stack }
+            : error,
+        threadId: currentThreadId ?? "new",
+        hasMessages: displayMessages.length > 0,
+      });
+      // #endregion
       if (msg.includes("CancelledError") || msg.includes("User interrupted")) {
         return;
       }
@@ -349,13 +397,27 @@ export default function App() {
   // and surface a timeout error. This prevents permanent UI freezes.
   useEffect(() => {
     if (!thread.isLoading) return;
+    const isResearchMode = currentRunModeRef.current === "research";
+    const timeoutMs = isResearchMode ? 15 * 60 * 1000 : 5 * 60 * 1000;
     const timeout = setTimeout(() => {
+      // #region debug-point D:safety-timeout
+      reportDebug("D", "frontend/src/App.tsx:safety-timeout", "[DEBUG] frontend safety timeout fired", {
+        threadId: currentThreadId ?? "new",
+        displayMessageCount: displayMessages.length,
+        mode: currentRunModeRef.current,
+        timeoutMs,
+      });
+      // #endregion
       thread.stop();
       submitLockRef.current = false;
-      setError("Request timed out. The backend may be unreachable or processing slowly.");
-    }, 5 * 60 * 1000);
+      setError(
+        isResearchMode
+          ? "Research request timed out after 15 minutes. The backend may still be processing or responding too slowly."
+          : "Request timed out. The backend may be unreachable or processing slowly."
+      );
+    }, timeoutMs);
     return () => clearTimeout(timeout);
-  }, [thread.isLoading, thread]);
+  }, [thread.isLoading, thread, currentThreadId, displayMessages.length]);
 
   const handleSubmit = useCallback(
     (submittedInputValue: string, mode: string) => {
@@ -372,9 +434,19 @@ export default function App() {
       }
 
       submitLockRef.current = true;
+      currentRunModeRef.current = mode;
       setProcessedEventsTimeline([]);
       setError(null);
       hasFinalizeEventOccurredRef.current = false;
+      // #region debug-point E:submit
+      reportDebug("E", "frontend/src/App.tsx:handleSubmit", "[DEBUG] submit stream request", {
+        mode,
+        threadId: currentThreadId ?? "new",
+        messageLength: submittedInputValue.length,
+        displayMessageCount: displayMessages.length,
+        apiUrl: LANGGRAPH_API_URL,
+      });
+      // #endregion
 
       const newMessages: Message[] = [
         ...displayMessages,
@@ -405,6 +477,7 @@ export default function App() {
       setPendingMessageText(null);
 
       submitLockRef.current = true;
+      currentRunModeRef.current = mode;
       setProcessedEventsTimeline([]);
       setError(null);
       hasFinalizeEventOccurredRef.current = false;

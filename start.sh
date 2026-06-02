@@ -25,9 +25,9 @@ echo "  PostgreSQL is ready."
 
 # 2. Start LangGraph backend
 echo ""
-echo "[2/4] Starting LangGraph backend on port 2024..."
+echo "[2/4] Starting LangGraph backend on port 2024 (reload disabled for stable streaming)..."
 cd "$BACKEND_DIR"
-uv run langgraph dev --port 2024 &
+uv run langgraph dev --no-reload --port 2024 &
 BACKEND_PID=$!
 echo "  Backend PID: $BACKEND_PID"
 

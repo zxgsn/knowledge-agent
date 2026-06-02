@@ -71,9 +71,9 @@ echo   PostgreSQL is ready.
 
 REM 2. Start LangGraph backend
 echo.
-echo [2/4] Starting LangGraph backend on port 2024...
+echo [2/4] Starting LangGraph backend on port 2024 (reload disabled for stable streaming)...
 cd /d "%BACKEND_DIR%"
-start "Knowledge Agent Backend" cmd /k "uv run langgraph dev --port 2024"
+start "Knowledge Agent Backend" cmd /k "uv run langgraph dev --no-reload --port 2024"
 echo   Waiting for backend to be ready (max 120 seconds)...
 set BACKEND_TIMEOUT=0
 :wait_backend

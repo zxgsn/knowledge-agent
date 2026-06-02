@@ -4,7 +4,10 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import re
+import time
+import urllib.request
 
 import httpx
 from langchain_core.callbacks import dispatch_custom_event
@@ -24,6 +27,7 @@ from agent.db import (
     search_by_temporal,
     search_recall,
 )
+from agent.heartbeat import heartbeat
 from agent.logger import get_logger
 from agent.prompts import ARCHIVAL_STORE_PROMPT, EVALUATE_RECALL_PROMPT, ROUTE_INTENT_PROMPT
 from agent.retry import with_retry
@@ -39,6 +43,41 @@ _TRANSIENT_ERRORS = (
     httpx.ConnectError,
     httpx.TimeoutException,
 )
+
+
+# #region debug-point B:report-helper
+def _debug_report(hypothesis_id: str, location: str, msg: str, data: dict | None = None) -> None:
+    payload = {
+        "sessionId": "frontend-network-error",
+        "runId": "pre-fix",
+        "hypothesisId": hypothesis_id,
+        "location": location,
+        "msg": msg,
+        "data": data or {},
+        "ts": int(time.time() * 1000),
+    }
+    debug_url = "http://127.0.0.1:7777/event"
+    env_path = os.path.join(".dbg", "frontend-network-error.env")
+    try:
+        with open(env_path, encoding="utf-8") as env_file:
+            for line in env_file:
+                if line.startswith("DEBUG_SERVER_URL="):
+                    debug_url = line.split("=", 1)[1].strip() or debug_url
+                    break
+    except Exception:
+        pass
+    try:
+        urllib.request.urlopen(
+            urllib.request.Request(
+                debug_url,
+                data=json.dumps(payload).encode(),
+                headers={"Content-Type": "application/json"},
+            ),
+            timeout=2,
+        ).read()
+    except Exception:
+        pass
+# #endregion
 
 
 async def route_intent(state: AgentState, config: RunnableConfig) -> dict:
@@ -205,7 +244,25 @@ async def recall_memory(state: AgentState, config: RunnableConfig) -> dict:
     """Search archival AND recall memory for content referenced by the user."""
     from datetime import datetime, timezone
 
+    try:
+        return await _recall_memory_impl(state, config)
+    except Exception as exc:
+        logger.error("recall_memory failed catastrophically: %s", exc, exc_info=True)
+        return {"archival_results": [], "recall_results": [], "memory_operations": []}
+
+
+async def _recall_memory_impl(state: AgentState, config: RunnableConfig) -> dict:
+    """Implementation of recall_memory, wrapped with top-level error handler."""
+    from datetime import datetime, timezone
+
     configurable = Configuration.from_runnable_config(config)
+    # #region debug-point B:recall-start
+    _debug_report("B", "backend/src/agent/nodes/memory_manager.py:recall:start", "[DEBUG] recall_memory entered", {
+        "mode": state.get("mode", "chat"),
+        "turn_count": state.get("turn_count", 0),
+        "message_count": len(state.get("messages", [])),
+    })
+    # #endregion
 
     user_msg = ""
     for msg in reversed(state["messages"]):
@@ -259,59 +316,95 @@ async def recall_memory(state: AgentState, config: RunnableConfig) -> dict:
             "memory_operations": memory_ops,
         }
 
-    # Step 1: Query rewriting (if enabled)
-    dispatch_custom_event("progress", {"stage": "memory_search", "detail": "Rewriting query..."}, config=config)
-    search_query = user_msg
-    if configurable.memory_query_rewrite_enabled:
-        search_query = await _rewrite_query(user_msg, state["messages"], configurable)
+    # Initialize defaults in case of partial execution
+    archival_results_raw = []
+    recall_results_raw = []
+    temporal_ref = None
 
-    # Step 2: HyDE (if enabled) -- generate hypothetical answer for embedding
-    dispatch_custom_event("progress", {"stage": "memory_search", "detail": "Generating search embedding..."}, config=config)
-    search_query_for_embed = search_query
-    if configurable.hyde_enabled:
-        search_query_for_embed = await _generate_hypothetical(search_query, configurable)
+    async with heartbeat(config, "memory_search", "Searching memory...", interval=8):
+        # Step 1: Query rewriting (if enabled)
+        # #region debug-point B:recall-before-rewrite
+        _debug_report("B", "backend/src/agent/nodes/memory_manager.py:recall:before-rewrite", "[DEBUG] recall about to rewrite query", {
+            "query_length": len(user_msg),
+            "thread_id": thread_id,
+        })
+        # #endregion
+        dispatch_custom_event("progress", {"stage": "memory_search", "detail": "Rewriting query..."}, config=config)
+        search_query = user_msg
+        if configurable.memory_query_rewrite_enabled:
+            search_query = await _rewrite_query(user_msg, state["messages"], configurable)
 
-    # Step 3: Search both archival and recall in parallel
-    # Dynamic context allocation: adjust retrieval volume based on query complexity
-    dispatch_custom_event("progress", {"stage": "memory_search", "detail": "Searching archival + recall memory..."}, config=config)
-    retrieval_limit = _estimate_query_complexity(search_query)
-    logger.info("Dynamic retrieval limit: %d (query: %s)", retrieval_limit, search_query[:60])
-    archival_task = asyncio.to_thread(
-        search_archival, search_query_for_embed, retrieval_limit,
-        rerank_enabled=configurable.rerank_enabled,
-        mmr_enabled=configurable.mmr_enabled,
-        mmr_lambda=configurable.mmr_lambda,
-    )
-    recall_task = asyncio.to_thread(search_recall, search_query, retrieval_limit, thread_id=thread_id)
-    try:
-        archival_results_raw, recall_results_raw = await asyncio.gather(
-            archival_task, recall_task
+        # Step 2: HyDE (if enabled) -- generate hypothetical answer for embedding
+        # #region debug-point B:recall-after-rewrite
+        _debug_report("B", "backend/src/agent/nodes/memory_manager.py:recall:after-rewrite", "[DEBUG] recall rewrite completed", {
+            "search_query_length": len(search_query),
+        })
+        # #endregion
+        dispatch_custom_event("progress", {"stage": "memory_search", "detail": "Generating search embedding..."}, config=config)
+        search_query_for_embed = search_query
+        if configurable.hyde_enabled:
+            search_query_for_embed = await _generate_hypothetical(search_query, configurable)
+
+        # Step 3: Search both archival and recall in parallel
+        # Dynamic context allocation: adjust retrieval volume based on query complexity
+        # #region debug-point B:recall-before-search
+        _debug_report("B", "backend/src/agent/nodes/memory_manager.py:recall:before-search", "[DEBUG] recall about to search memory stores", {
+            "search_query_for_embed_length": len(search_query_for_embed),
+        })
+        # #endregion
+        dispatch_custom_event("progress", {"stage": "memory_search", "detail": "Searching archival + recall memory..."}, config=config)
+        retrieval_limit = _estimate_query_complexity(search_query)
+        logger.info("Dynamic retrieval limit: %d (query: %s)", retrieval_limit, search_query[:60])
+        archival_task = asyncio.to_thread(
+            search_archival, search_query_for_embed, retrieval_limit,
+            rerank_enabled=configurable.rerank_enabled,
+            mmr_enabled=configurable.mmr_enabled,
+            mmr_lambda=configurable.mmr_lambda,
         )
-    except Exception as exc:
-        logger.warning("Memory search DB call failed, continuing without memory: %s", exc)
-        archival_results_raw, recall_results_raw = [], []
+        recall_task = asyncio.to_thread(search_recall, search_query, retrieval_limit, thread_id=thread_id)
+        try:
+            archival_results_raw, recall_results_raw = await asyncio.gather(
+                archival_task, recall_task
+            )
+        except Exception as exc:
+            _debug_report("B", "backend/src/agent/nodes/memory_manager.py:recall:search-error", "[DEBUG] memory DB search failed", {
+                "error_type": type(exc).__name__,
+                "error": repr(exc),
+            })
+            logger.warning("Memory search DB call failed, continuing without memory: %s", exc)
+            archival_results_raw, recall_results_raw = [], []
+        # #region debug-point B:recall-after-search
+        _debug_report("B", "backend/src/agent/nodes/memory_manager.py:recall:after-search", "[DEBUG] recall search completed", {
+            "archival_count": len(archival_results_raw),
+            "recall_count": len(recall_results_raw),
+            "retrieval_limit": retrieval_limit,
+        })
+        # #endregion
 
-    # Step 3b: Temporal/entity-aware supplementary search
-    temporal_ref = _detect_temporal_ref(search_query)
-    if temporal_ref and configurable.structured_extraction:
-        temporal_results = await asyncio.to_thread(
-            search_by_temporal, temporal_ref, "conversation_facts", 5
-        )
-        # Merge temporal results (avoid duplicates by id)
-        existing_ids = {r.get("id") for r in archival_results_raw}
-        for tr in temporal_results:
-            if tr["id"] not in existing_ids:
-                archival_results_raw.append({
-                    "content": tr["content"],
-                    "metadata": tr.get("metadata", {}),
-                    "score": 0.6,  # moderate score for metadata match
-                })
+        # Step 3b: Temporal/entity-aware supplementary search
+        temporal_ref = _detect_temporal_ref(search_query)
+        if temporal_ref and configurable.structured_extraction:
+            try:
+                temporal_results = await asyncio.to_thread(
+                    search_by_temporal, temporal_ref, "conversation_facts", 5
+                )
+                # Merge temporal results (avoid duplicates by id)
+                existing_ids = {r.get("id") for r in archival_results_raw}
+                for tr in temporal_results:
+                    if tr["id"] not in existing_ids:
+                        archival_results_raw.append({
+                            "content": tr["content"],
+                            "metadata": tr.get("metadata", {}),
+                            "score": 0.6,  # moderate score for metadata match
+                        })
+            except Exception as exc:
+                logger.warning("Temporal search failed: %s", exc)
 
-    # Save user message to recall AFTER searching to avoid matching itself
-    try:
-        await asyncio.to_thread(save_to_recall, "user", user_msg, thread_id=thread_id)
-    except Exception as exc:
-        logger.warning("Failed to save to recall: %s", exc)
+        # Save user message to recall AFTER searching to avoid matching itself
+        try:
+            await asyncio.to_thread(save_to_recall, "user", user_msg, thread_id=thread_id)
+        except Exception as exc:
+            logger.warning("Failed to save to recall: %s", exc)
 
     # Log memory operation
     memory_ops = [{
@@ -354,6 +447,19 @@ async def evaluate_recall(state: AgentState, config: RunnableConfig) -> dict:
 
     Routes to respond (memory sufficient) or generate_query (needs web research).
     """
+    try:
+        return await _evaluate_recall_impl(state, config)
+    except Exception as exc:
+        logger.error("evaluate_recall failed catastrophically: %s", exc, exc_info=True)
+        return {
+            "memory_sufficient": False,
+            "memory_evaluation": f"Error during evaluation: {exc}",
+            "memory_operations": [],
+        }
+
+
+async def _evaluate_recall_impl(state: AgentState, config: RunnableConfig) -> dict:
+    """Implementation of evaluate_recall, wrapped with top-level error handler."""
     from datetime import datetime, timezone
 
     configurable = Configuration.from_runnable_config(config)
@@ -392,26 +498,28 @@ async def evaluate_recall(state: AgentState, config: RunnableConfig) -> dict:
 
     # Ask LLM to evaluate (with retry)
     dispatch_custom_event("progress", {"stage": "evaluate_recall", "detail": "Evaluating memory relevance..."}, config=config)
-    llm = get_llm(configurable, temperature=0)
 
-    prompt = EVALUATE_RECALL_PROMPT.format(
-        question=user_msg,
-        memory_content=memory_content,
-    )
+    async with heartbeat(config, "evaluate_recall", "Evaluating memory...", interval=8):
+        llm = get_llm(configurable, temperature=0)
 
-    try:
-        response = await with_retry(
-            max_retries=2, retryable_exceptions=_TRANSIENT_ERRORS,
-        )(llm.ainvoke)(prompt)
-        parsed = parse_json(response.content)
-        is_sufficient = parsed.get("is_sufficient", False)
-        reason = parsed.get("reason", "Evaluation completed.")
-        logger.debug("Recall evaluation: sufficient=%s reason=%s", is_sufficient, reason[:80])
-    except Exception as exc:
-        # Safe fallback: assume memory is insufficient so research is triggered
-        logger.warning("Recall evaluation LLM failed, assuming insufficient: %s", exc)
-        is_sufficient = False
-        reason = "Failed to evaluate memory content."
+        prompt = EVALUATE_RECALL_PROMPT.format(
+            question=user_msg,
+            memory_content=memory_content,
+        )
+
+        try:
+            response = await with_retry(
+                max_retries=2, retryable_exceptions=_TRANSIENT_ERRORS,
+            )(llm.ainvoke)(prompt)
+            parsed = parse_json(response.content)
+            is_sufficient = parsed.get("is_sufficient", False)
+            reason = parsed.get("reason", "Evaluation completed.")
+            logger.debug("Recall evaluation: sufficient=%s reason=%s", is_sufficient, reason[:80])
+        except Exception as exc:
+            # Safe fallback: assume memory is insufficient so research is triggered
+            logger.warning("Recall evaluation LLM failed, assuming insufficient: %s", exc)
+            is_sufficient = False
+            reason = "Failed to evaluate memory content."
 
     memory_ops = [{
         "type": "evaluate",
@@ -429,11 +537,19 @@ async def evaluate_recall(state: AgentState, config: RunnableConfig) -> dict:
 
 async def save_to_archival(state: AgentState, config: RunnableConfig) -> dict:
     """Extract key findings and save them to archival memory (PostgreSQL)."""
+    try:
+        return await _save_to_archival_impl(state, config)
+    except Exception as exc:
+        logger.error("save_to_archival failed catastrophically: %s", exc, exc_info=True)
+        return {"memory_operations": []}
+
+
+async def _save_to_archival_impl(state: AgentState, config: RunnableConfig) -> dict:
+    """Implementation of save_to_archival, wrapped with top-level error handler."""
     from datetime import datetime, timezone
 
     dispatch_custom_event("progress", {"stage": "save_to_archival", "detail": "Extracting key findings..."}, config=config)
     configurable = Configuration.from_runnable_config(config)
-    llm = get_llm(configurable, temperature=0.3)
 
     research_topic = _get_research_topic(state["messages"])
     summaries = "\n\n---\n\n".join(state.get("web_research_result", []))
@@ -441,29 +557,32 @@ async def save_to_archival(state: AgentState, config: RunnableConfig) -> dict:
     if not summaries:
         return {}
 
-    prompt = ARCHIVAL_STORE_PROMPT.format(
-        research_topic=research_topic,
-        summaries=summaries,
-    )
+    async with heartbeat(config, "save_to_archival", "Saving to memory...", interval=8):
+        llm = get_llm(configurable, temperature=0.3)
 
-    try:
-        response = await with_retry(
-            max_retries=2, retryable_exceptions=_TRANSIENT_ERRORS,
-        )(llm.ainvoke)(prompt)
-    except Exception as exc:
-        logger.warning("Archival store LLM failed after retries: %s", exc)
-        return {}
-
-    try:
-        entry_id = await asyncio.to_thread(
-            put_to_archival,
-            response.content,
-            "research",
-            {"source": "research_summary", "topic": research_topic},
+        prompt = ARCHIVAL_STORE_PROMPT.format(
+            research_topic=research_topic,
+            summaries=summaries,
         )
-    except Exception as exc:
-        logger.error("Failed to store to archival: %s", exc)
-        return {}
+
+        try:
+            response = await with_retry(
+                max_retries=2, retryable_exceptions=_TRANSIENT_ERRORS,
+            )(llm.ainvoke)(prompt)
+        except Exception as exc:
+            logger.warning("Archival store LLM failed after retries: %s", exc)
+            return {}
+
+        try:
+            entry_id = await asyncio.to_thread(
+                put_to_archival,
+                response.content,
+                "research",
+                {"source": "research_summary", "topic": research_topic},
+            )
+        except Exception as exc:
+            logger.error("Failed to store to archival: %s", exc)
+            return {}
 
     # Log memory operation -- do NOT return archival_results here,
     # as that would overwrite the original memory search results

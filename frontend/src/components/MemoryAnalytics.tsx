@@ -3,11 +3,10 @@ import { Link } from "react-router-dom";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
+import { LIBRARY_API_BASE } from "@/lib/api";
 import { ArrowLeft, BarChart3, Database, MessageSquare, FileText, History, Search, TrendingUp, Zap } from "lucide-react";
 
-const API_BASE = import.meta.env.DEV
-  ? "http://localhost:8000"
-  : "";
+const API_BASE = LIBRARY_API_BASE;
 
 interface ImportanceBucket {
   range: string;

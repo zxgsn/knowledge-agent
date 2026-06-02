@@ -1,9 +1,10 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 import { Button } from "@/components/ui/button";
+import { LANGGRAPH_API_URL, LIBRARY_API_BASE } from "@/lib/api";
 import { MessageSquare, Plus, PanelLeftClose, PanelLeft, Trash2, Loader2 } from "lucide-react";
 import { Client } from "@langchain/langgraph-sdk";
 
-const API_URL = import.meta.env.VITE_LANGGRAPH_URL || "http://localhost:2024";
+const API_URL = LANGGRAPH_API_URL;
 
 interface Thread {
   thread_id: string;
@@ -59,8 +60,7 @@ export function ThreadSidebar({
       const client = new Client({ apiUrl: API_URL });
       await client.threads.delete(threadId);
       try {
-        const API_BASE = import.meta.env.DEV ? "http://localhost:8000" : "";
-        await fetch(`${API_BASE}/api/recall/entries?thread_id=${threadId}`, { method: "DELETE" });
+        await fetch(`${LIBRARY_API_BASE}/api/recall/entries?thread_id=${threadId}`, { method: "DELETE" });
       } catch { /* best-effort */ }
       setThreads((prev) => prev.filter((t) => t.thread_id !== threadId));
       if (currentThreadId === threadId) onThreadSelect(null);

@@ -13,6 +13,8 @@ export default defineConfig({
     },
   },
   server: {
+    host: "127.0.0.1",
+    port: 4173,
     proxy: {
       // Proxy API requests to the backend server
       "/api": {

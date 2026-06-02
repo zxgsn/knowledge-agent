@@ -123,7 +123,7 @@ LANGCHAIN_PROJECT=knowledge-agent
 # 后端
 cd backend
 pip install -e .
-langgraph dev
+langgraph dev --no-reload
 
 # 前端
 cd frontend

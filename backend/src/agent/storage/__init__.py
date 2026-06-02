@@ -4,18 +4,22 @@ from __future__ import annotations
 
 import os
 from contextlib import contextmanager
+from threading import Lock
 
 from agent.storage.embedding import LocalEmbeddings
 
 _embeddings: LocalEmbeddings | None = None
 _recall_table_ready: bool = False
 _pool = None
+_embeddings_lock = Lock()
 
 
 def get_embeddings() -> LocalEmbeddings:
     global _embeddings
     if _embeddings is None:
-        _embeddings = LocalEmbeddings()
+        with _embeddings_lock:
+            if _embeddings is None:
+                _embeddings = LocalEmbeddings()
     return _embeddings
 
 

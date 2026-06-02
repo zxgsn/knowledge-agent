@@ -29,6 +29,7 @@ from agent.db import (
     update_archival,
     update_importance_score,
 )
+from agent.heartbeat import heartbeat
 from agent.memory.importance import calculate_importance
 from agent.logger import get_logger
 from agent.prompts import (
@@ -103,107 +104,117 @@ async def memory_pipeline(state: AgentState, config: RunnableConfig) -> dict:
     1. MEMORY_JUDGMENT_PROMPT -- lightweight check if the turn is worth remembering
     2. SELECTIVE_EXTRACTION_PROMPT -- extract ADD/UPDATE/DELETE ops with existing memory context
     """
+    try:
+        return await _memory_pipeline_impl(state, config)
+    except Exception as exc:
+        logger.error("memory_pipeline failed catastrophically: %s", exc, exc_info=True)
+        return {"turn_count": state.get("turn_count", 0) + 1, "memory_operations": []}
+
+
+async def _memory_pipeline_impl(state: AgentState, config: RunnableConfig) -> dict:
+    """Implementation of memory_pipeline, wrapped with top-level error handler."""
     turn_count = state.get("turn_count", 0) + 1
     configurable = Configuration.from_runnable_config(config)
 
     if not configurable.memory_selective_enabled:
         return {"turn_count": turn_count}
 
-    # Summarize old messages if conversation is getting long
-    messages = state["messages"]
-    if len(messages) > SUMMARIZE_THRESHOLD:
-        llm = get_llm(configurable, temperature=0.2)
-        messages = await summarize_old_messages(messages, llm)
+    async with heartbeat(config, "memory_pipeline", "Processing memory...", interval=8):
+        # Summarize old messages if conversation is getting long
+        messages = state["messages"]
+        if len(messages) > SUMMARIZE_THRESHOLD:
+            llm = get_llm(configurable, temperature=0.2)
+            messages = await summarize_old_messages(messages, llm)
 
-    # Extract last user + assistant messages
-    user_msg = ""
-    assistant_msg = ""
-    for msg in reversed(messages):
-        if isinstance(msg, AIMessage) and msg.content and not assistant_msg:
-            assistant_msg = msg.content
-        elif isinstance(msg, HumanMessage) and msg.content and not user_msg:
-            user_msg = msg.content
-        if user_msg and assistant_msg:
-            break
+        # Extract last user + assistant messages
+        user_msg = ""
+        assistant_msg = ""
+        for msg in reversed(messages):
+            if isinstance(msg, AIMessage) and msg.content and not assistant_msg:
+                assistant_msg = msg.content
+            elif isinstance(msg, HumanMessage) and msg.content and not user_msg:
+                user_msg = msg.content
+            if user_msg and assistant_msg:
+                break
 
-    if not user_msg or not assistant_msg:
-        return {"turn_count": turn_count}
+        if not user_msg or not assistant_msg:
+            return {"turn_count": turn_count}
 
-    llm = get_llm(configurable, temperature=0.0)
+        llm = get_llm(configurable, temperature=0.0)
 
-    # Step 1: Judge if this turn is worth remembering (with retry)
-    dispatch_custom_event("progress", {"stage": "memory_pipeline", "detail": "Judging if memorable..."}, config=config)
-    judgment_prompt = MEMORY_JUDGMENT_PROMPT.format(
-        user_message=user_msg,
-        assistant_message=assistant_msg,
-    )
-    try:
-        judgment_response = await with_retry(max_retries=2)(llm.ainvoke)(judgment_prompt)
-        judgment = parse_json(judgment_response.content)
-        logger.debug("Judgment result: memorable=%s reason=%s", judgment.get("memorable"), judgment.get("reason", "")[:80])
-    except Exception as exc:
-        logger.warning("Memory judgment LLM failed after retries: %s", exc)
-        return {"turn_count": turn_count}
-
-    if not judgment.get("memorable", False):
-        return {
-            "turn_count": turn_count,
-            "memory_operations": [{
-                "type": "pipeline_judgment",
-                "memorable": False,
-                "reason": judgment.get("reason", ""),
-                "turn_count": turn_count,
-                "timestamp": datetime.now(timezone.utc).isoformat(),
-            }],
-        }
-
-    # Step 2: Search existing memories for context
-    search_query = user_msg[:200]
-    try:
-        existing = await asyncio.to_thread(
-            get_existing_memories, search_query, "conversation_facts", 10
+        # Step 1: Judge if this turn is worth remembering (with retry)
+        dispatch_custom_event("progress", {"stage": "memory_pipeline", "detail": "Judging if memorable..."}, config=config)
+        judgment_prompt = MEMORY_JUDGMENT_PROMPT.format(
+            user_message=user_msg,
+            assistant_message=assistant_msg,
         )
-    except Exception as exc:
-        logger.warning("get_existing_memories failed: %s", exc)
-        existing = []
+        try:
+            judgment_response = await with_retry(max_retries=2)(llm.ainvoke)(judgment_prompt)
+            judgment = parse_json(judgment_response.content)
+            logger.debug("Judgment result: memorable=%s reason=%s", judgment.get("memorable"), judgment.get("reason", "")[:80])
+        except Exception as exc:
+            logger.warning("Memory judgment LLM failed after retries: %s", exc)
+            return {"turn_count": turn_count}
 
-    existing_text = "None"
-    if existing:
-        existing_text = "\n".join(
-            f"- [id: {m['id']}] {m['content']}" for m in existing
-        )
-
-    # Step 3: Extract memory operations (with retry)
-    dispatch_custom_event("progress", {"stage": "memory_pipeline", "detail": "Extracting memory operations..."}, config=config)
-    extraction_prompt = SELECTIVE_EXTRACTION_PROMPT.format(
-        existing_memories=existing_text,
-        user_message=user_msg,
-        assistant_message=assistant_msg,
-    )
-    try:
-        response = await with_retry(max_retries=2)(llm.ainvoke)(extraction_prompt)
-        parsed = parse_json(response.content)
-        logger.debug("Extraction parsed: %d operations", len(parsed.get("memory", [])))
-    except Exception as exc:
-        logger.warning("Memory extraction LLM failed after retries: %s", exc)
-        return {"turn_count": turn_count}
-
-    operations = parsed.get("memory", [])
-    if not operations:
-        return {
-            "turn_count": turn_count,
-            "memory_operations": [{
-                "type": "pipeline_extract",
-                "facts_count": 0,
+        if not judgment.get("memorable", False):
+            return {
                 "turn_count": turn_count,
-                "timestamp": datetime.now(timezone.utc).isoformat(),
-            }],
-        }
+                "memory_operations": [{
+                    "type": "pipeline_judgment",
+                    "memorable": False,
+                    "reason": judgment.get("reason", ""),
+                    "turn_count": turn_count,
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                }],
+            }
 
-    # Step 4: Conflict resolution for ADD operations
-    operations = await _resolve_conflicts(
-        operations, existing, llm, configurable.conflict_confidence_threshold
-    )
+        # Step 2: Search existing memories for context
+        search_query = user_msg[:200]
+        try:
+            existing = await asyncio.to_thread(
+                get_existing_memories, search_query, "conversation_facts", 10
+            )
+        except Exception as exc:
+            logger.warning("get_existing_memories failed: %s", exc)
+            existing = []
+
+        existing_text = "None"
+        if existing:
+            existing_text = "\n".join(
+                f"- [id: {m['id']}] {m['content']}" for m in existing
+            )
+
+        # Step 3: Extract memory operations (with retry)
+        dispatch_custom_event("progress", {"stage": "memory_pipeline", "detail": "Extracting memory operations..."}, config=config)
+        extraction_prompt = SELECTIVE_EXTRACTION_PROMPT.format(
+            existing_memories=existing_text,
+            user_message=user_msg,
+            assistant_message=assistant_msg,
+        )
+        try:
+            response = await with_retry(max_retries=2)(llm.ainvoke)(extraction_prompt)
+            parsed = parse_json(response.content)
+            logger.debug("Extraction parsed: %d operations", len(parsed.get("memory", [])))
+        except Exception as exc:
+            logger.warning("Memory extraction LLM failed after retries: %s", exc)
+            return {"turn_count": turn_count}
+
+        operations = parsed.get("memory", [])
+        if not operations:
+            return {
+                "turn_count": turn_count,
+                "memory_operations": [{
+                    "type": "pipeline_extract",
+                    "facts_count": 0,
+                    "turn_count": turn_count,
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                }],
+            }
+
+        # Step 4: Conflict resolution for ADD operations
+        operations = await _resolve_conflicts(
+            operations, existing, llm, configurable.conflict_confidence_threshold
+        )
 
     # Step 5: Execute operations
     stored_count = 0
@@ -514,6 +525,15 @@ async def _consolidate_namespace(
 
 async def consolidate_memory(state: AgentState, config: RunnableConfig) -> dict:
     """Periodic consolidation: dedup, merge, and cleanup across all managed namespaces."""
+    try:
+        return await _consolidate_memory_impl(state, config)
+    except Exception as exc:
+        logger.error("consolidate_memory failed catastrophically: %s", exc, exc_info=True)
+        return {"memory_operations": []}
+
+
+async def _consolidate_memory_impl(state: AgentState, config: RunnableConfig) -> dict:
+    """Implementation of consolidate_memory, wrapped with top-level error handler."""
     dispatch_custom_event("progress", {"stage": "consolidate_memory", "detail": "Consolidating memories..."}, config=config)
     configurable = Configuration.from_runnable_config(config)
     merge_llm = get_llm(configurable, temperature=0.2)
@@ -521,52 +541,53 @@ async def consolidate_memory(state: AgentState, config: RunnableConfig) -> dict:
     ops = []
     t0 = datetime.now(timezone.utc)
 
-    # 1. conversation_facts: dedup + merge
-    result = await _consolidate_namespace(
-        "conversation_facts", merge_llm, threshold=0.85, max_entries=500,
-    )
-    ops.append({"type": "consolidate", **result, "timestamp": t0.isoformat()})
-
-    # 2. research: dedup + merge
-    result = await _consolidate_namespace(
-        "research", merge_llm, threshold=0.85, max_entries=200,
-    )
-    ops.append({"type": "consolidate", **result, "timestamp": t0.isoformat()})
-
-    # 3. ingested: cleanup old + excess (no merge -- preserve original chunks)
-    cleanup_days = configurable.archival_cleanup_days
-    max_entries = configurable.archival_max_entries
-
-    try:
-        cleaned = await asyncio.to_thread(cleanup_namespace, "ingested", cleanup_days)
-        excess = await asyncio.to_thread(cleanup_excess, "ingested", max_entries)
-        if cleaned or excess:
-            ops.append({
-                "type": "cleanup",
-                "namespace": "ingested",
-                "expired_deleted": cleaned,
-                "excess_deleted": excess,
-                "timestamp": t0.isoformat(),
-            })
-    except Exception as exc:
-        logger.error("Ingested cleanup failed: %s", exc)
-
-    # 4. recall memory: cleanup old + excess per thread
-    thread_id = state.get("thread_id", "default")
-    try:
-        recall_cleaned, recall_excess = await asyncio.to_thread(
-            cleanup_recall, thread_id, cleanup_days, 500,
+    async with heartbeat(config, "consolidate_memory", "Consolidating memories...", interval=10):
+        # 1. conversation_facts: dedup + merge
+        result = await _consolidate_namespace(
+            "conversation_facts", merge_llm, threshold=0.85, max_entries=500,
         )
-        if recall_cleaned or recall_excess:
-            ops.append({
-                "type": "cleanup",
-                "namespace": "recall_memory",
-                "expired_deleted": recall_cleaned,
-                "excess_deleted": recall_excess,
-                "thread_id": thread_id,
-                "timestamp": t0.isoformat(),
-            })
-    except Exception as exc:
-        logger.error("Recall cleanup failed: %s", exc)
+        ops.append({"type": "consolidate", **result, "timestamp": t0.isoformat()})
+
+        # 2. research: dedup + merge
+        result = await _consolidate_namespace(
+            "research", merge_llm, threshold=0.85, max_entries=200,
+        )
+        ops.append({"type": "consolidate", **result, "timestamp": t0.isoformat()})
+
+        # 3. ingested: cleanup old + excess (no merge -- preserve original chunks)
+        cleanup_days = configurable.archival_cleanup_days
+        max_entries = configurable.archival_max_entries
+
+        try:
+            cleaned = await asyncio.to_thread(cleanup_namespace, "ingested", cleanup_days)
+            excess = await asyncio.to_thread(cleanup_excess, "ingested", max_entries)
+            if cleaned or excess:
+                ops.append({
+                    "type": "cleanup",
+                    "namespace": "ingested",
+                    "expired_deleted": cleaned,
+                    "excess_deleted": excess,
+                    "timestamp": t0.isoformat(),
+                })
+        except Exception as exc:
+            logger.error("Ingested cleanup failed: %s", exc)
+
+        # 4. recall memory: cleanup old + excess per thread
+        thread_id = state.get("thread_id", "default")
+        try:
+            recall_cleaned, recall_excess = await asyncio.to_thread(
+                cleanup_recall, thread_id, cleanup_days, 500,
+            )
+            if recall_cleaned or recall_excess:
+                ops.append({
+                    "type": "cleanup",
+                    "namespace": "recall_memory",
+                    "expired_deleted": recall_cleaned,
+                    "excess_deleted": recall_excess,
+                    "thread_id": thread_id,
+                    "timestamp": t0.isoformat(),
+                })
+        except Exception as exc:
+            logger.error("Recall cleanup failed: %s", exc)
 
     return {"memory_operations": ops}

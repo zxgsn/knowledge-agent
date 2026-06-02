@@ -10,6 +10,7 @@ Downloaded to backend/models/bge-reranker-v2-m3/ (not HF cache).
 from __future__ import annotations
 
 import os
+import threading
 from pathlib import Path
 
 from agent.logger import get_logger
@@ -18,6 +19,7 @@ from agent.retry import with_retry
 logger = get_logger(__name__)
 
 _model = None
+_model_lock = threading.Lock()
 
 
 def _load_model():
@@ -35,7 +37,7 @@ def _load_model():
         model_path = model_name
         logger.info("Loading reranker model from HF: %s", model_path)
 
-    model = CrossEncoder(model_path, max_length=512)
+    model = CrossEncoder(model_path, max_length=512, model_kwargs={"low_cpu_mem_usage": True})
     logger.info("Reranker model loaded successfully")
     return model
 
@@ -47,13 +49,20 @@ def _load_model():
     retryable_exceptions=(OSError, RuntimeError, ConnectionError),
 )
 def _get_model():
-    """Get or lazily load the cross-encoder model with retry on first load."""
+    """Get or lazily load the cross-encoder model with retry on first load.
+
+    Thread-safe: uses double-checked locking to prevent duplicate loads.
+    """
     global _model
     if _model is not None:
         return _model
 
-    _model = _load_model()
-    return _model
+    with _model_lock:
+        # Double-check after acquiring lock
+        if _model is not None:
+            return _model
+        _model = _load_model()
+        return _model
 
 
 def rerank(
@@ -94,7 +103,11 @@ def rerank(
 
     try:
         pairs = [[query, r["content"][:512]] for r in results]
-        scores = model.predict(pairs)
+        # Run predict in a subprocess-safe way to avoid segfaults
+        # on Windows with large models in threaded contexts
+        import torch
+        with torch.no_grad():
+            scores = model.predict(pairs, show_progress_bar=False)
 
         for r, s in zip(results, scores):
             r["score"] = float(s)

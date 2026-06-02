@@ -3,8 +3,12 @@
 from __future__ import annotations
 
 import asyncio
+import json
+import os
 import re
 import sys
+import time
+import urllib.request
 
 from langchain_core.callbacks import dispatch_custom_event
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
@@ -12,6 +16,7 @@ from langchain_core.runnables import RunnableConfig
 
 from agent.configuration import Configuration
 from agent.db import save_to_recall
+from agent.heartbeat import heartbeat
 from agent.memory.core_memory import CoreMemory
 from agent.memory.tools import create_memory_tools
 from agent.prompts import ANSWER_PROMPT, SUMMARIZE_HISTORY_PROMPT, SYSTEM_PROMPT, get_current_date
@@ -24,6 +29,41 @@ CHARS_PER_TOKEN = 4
 # Reserve tokens for system prompt, tools, and response
 CONTEXT_TOKEN_BUDGET = 120_000
 RESERVED_TOKENS = 10_000
+
+
+# #region debug-point B:report-helper
+def _debug_report(hypothesis_id: str, location: str, msg: str, data: dict | None = None) -> None:
+    payload = {
+        "sessionId": "frontend-network-error",
+        "runId": "pre-fix",
+        "hypothesisId": hypothesis_id,
+        "location": location,
+        "msg": msg,
+        "data": data or {},
+        "ts": int(time.time() * 1000),
+    }
+    debug_url = "http://127.0.0.1:7777/event"
+    env_path = os.path.join(".dbg", "frontend-network-error.env")
+    try:
+        with open(env_path, encoding="utf-8") as env_file:
+            for line in env_file:
+                if line.startswith("DEBUG_SERVER_URL="):
+                    debug_url = line.split("=", 1)[1].strip() or debug_url
+                    break
+    except Exception:
+        pass
+    try:
+        urllib.request.urlopen(
+            urllib.request.Request(
+                debug_url,
+                data=json.dumps(payload).encode(),
+                headers={"Content-Type": "application/json"},
+            ),
+            timeout=2,
+        ).read()
+    except Exception:
+        pass
+# #endregion
 
 
 def _estimate_tokens(text: str) -> int:
@@ -72,6 +112,14 @@ async def respond(state: AgentState, config: RunnableConfig) -> dict:
     """
     configurable = Configuration.from_runnable_config(config)
     llm = get_llm(configurable, temperature=0.5)
+    # #region debug-point B:respond-start
+    _debug_report("B", "backend/src/agent/nodes/responder.py:respond:start", "[DEBUG] respond node started", {
+        "mode": state.get("mode", "chat"),
+        "message_count": len(state.get("messages", [])),
+        "archival_results": len(state.get("archival_results", [])),
+        "recall_results": len(state.get("recall_results", [])),
+    })
+    # #endregion
 
     core_memory = CoreMemory.from_dict(state.get("core_memory", {}))
     summaries = "\n\n---\n\n".join(state.get("web_research_result", []))
@@ -201,40 +249,123 @@ async def respond(state: AgentState, config: RunnableConfig) -> dict:
 
     # Tool-calling loop: LLM may call tools multiple times before final answer
     dispatch_custom_event("progress", {"stage": "respond", "detail": "Generating response..."}, config=config)
-    response = await llm_with_tools.ainvoke(messages_for_llm)
 
-    for _ in range(MAX_TOOL_ROUNDS):
-        if not response.tool_calls:
-            break
-
-        # Execute each tool call and collect results.
-        # Append the full assistant message (with reasoning_content) directly.
-        messages_for_llm.append(response)
-        for tc in response.tool_calls:
-            tool = tools_by_name.get(tc["name"])
-            if tool:
-                # Run tool in thread to avoid blocking the event loop
-                # (archival tools use sync psycopg which blockbuster flags)
-                result = await asyncio.to_thread(tool.invoke, tc["args"])
-            else:
-                result = f"Unknown tool: {tc['name']}"
-            messages_for_llm.append({
-                "role": "tool",
-                "content": str(result),
-                "tool_call_id": tc["id"],
-            })
-
-        response = await llm_with_tools.ainvoke(messages_for_llm)
-
-    # If the LLM returned only tool calls with no text content, force one more
-    # call without tools to produce an actual user-facing response.
-    if not response.content and response.tool_calls:
-        messages_for_llm.append(response)
-        messages_for_llm.append({
-            "role": "user",
-            "content": "Please provide your response to the user now.",
+    response = None
+    async with heartbeat(config, "respond", "Generating response...", interval=10):
+        # #region debug-point B:respond-llm-call
+        llm_call_started = time.perf_counter()
+        _debug_report("B", "backend/src/agent/nodes/responder.py:respond:llm-before", "[DEBUG] response LLM call starting", {
+            "messages_for_llm": len(messages_for_llm),
         })
-        response = await llm.ainvoke(messages_for_llm)
+        try:
+            response = await llm_with_tools.ainvoke(messages_for_llm)
+            _debug_report("B", "backend/src/agent/nodes/responder.py:respond:llm-after", "[DEBUG] response LLM call completed", {
+                "elapsed_ms": round((time.perf_counter() - llm_call_started) * 1000, 2),
+                "tool_calls": len(response.tool_calls or []),
+                "content_length": len(response.content or ""),
+            })
+        except Exception as exc:
+            _debug_report("B", "backend/src/agent/nodes/responder.py:respond:llm-error", "[DEBUG] response LLM call failed", {
+                "elapsed_ms": round((time.perf_counter() - llm_call_started) * 1000, 2),
+                "error_type": type(exc).__name__,
+                "error": repr(exc),
+            })
+            logger.error("LLM call failed in respond: %s", exc)
+            error_msg = f"I apologize, but I encountered an error while generating a response: {type(exc).__name__}. Please try again."
+            return {
+                "messages": [AIMessage(content=error_msg)],
+                "core_memory": core_memory.to_dict_with_history(),
+                "conversation_summary": new_summary,
+            }
+        # #endregion
+
+        for _ in range(MAX_TOOL_ROUNDS):
+            if not response.tool_calls:
+                break
+
+            # Execute each tool call and collect results.
+            # Append the full assistant message (with reasoning_content) directly.
+            messages_for_llm.append(response)
+            for tc in response.tool_calls:
+                tool = tools_by_name.get(tc["name"])
+                if tool:
+                    # Run tool in thread to avoid blocking the event loop
+                    # (archival tools use sync psycopg which blockbuster flags)
+                    result = await asyncio.to_thread(tool.invoke, tc["args"])
+                else:
+                    result = f"Unknown tool: {tc['name']}"
+                messages_for_llm.append({
+                    "role": "tool",
+                    "content": str(result),
+                    "tool_call_id": tc["id"],
+                })
+
+            # #region debug-point B:respond-tool-loop
+            loop_started = time.perf_counter()
+            try:
+                response = await llm_with_tools.ainvoke(messages_for_llm)
+                _debug_report("B", "backend/src/agent/nodes/responder.py:respond:tool-loop", "[DEBUG] response tool loop iteration completed", {
+                    "elapsed_ms": round((time.perf_counter() - loop_started) * 1000, 2),
+                    "tool_calls": len(response.tool_calls or []),
+                    "content_length": len(response.content or ""),
+                })
+            except Exception as exc:
+                _debug_report("B", "backend/src/agent/nodes/responder.py:respond:tool-loop-error", "[DEBUG] response tool loop failed", {
+                    "elapsed_ms": round((time.perf_counter() - loop_started) * 1000, 2),
+                    "error_type": type(exc).__name__,
+                    "error": repr(exc),
+                })
+                logger.error("Tool loop failed in respond: %s", exc)
+                # If we have partial content, use it; otherwise return error
+                if response and response.content:
+                    break  # Use existing response content
+                error_msg = f"I encountered an error during tool execution: {type(exc).__name__}. Please try again."
+                return {
+                    "messages": [AIMessage(content=error_msg)],
+                    "core_memory": core_memory.to_dict_with_history(),
+                    "conversation_summary": new_summary,
+                }
+            # #endregion
+
+        # If the LLM returned only tool calls with no text content, force one more
+        # call without tools to produce an actual user-facing response.
+        if response and not response.content and response.tool_calls:
+            messages_for_llm.append(response)
+            messages_for_llm.append({
+                "role": "user",
+                "content": "Please provide your response to the user now.",
+            })
+            # #region debug-point B:respond-finalize
+            finalize_started = time.perf_counter()
+            try:
+                response = await llm.ainvoke(messages_for_llm)
+                _debug_report("B", "backend/src/agent/nodes/responder.py:respond:finalize", "[DEBUG] finalize response call completed", {
+                    "elapsed_ms": round((time.perf_counter() - finalize_started) * 1000, 2),
+                    "content_length": len(response.content or ""),
+                })
+            except Exception as exc:
+                _debug_report("B", "backend/src/agent/nodes/responder.py:respond:finalize-error", "[DEBUG] finalize response call failed", {
+                    "elapsed_ms": round((time.perf_counter() - finalize_started) * 1000, 2),
+                    "error_type": type(exc).__name__,
+                    "error": repr(exc),
+                })
+                logger.error("Finalize call failed in respond: %s", exc)
+                error_msg = f"I encountered an error while finalizing the response: {type(exc).__name__}. Please try again."
+                return {
+                    "messages": [AIMessage(content=error_msg)],
+                    "core_memory": core_memory.to_dict_with_history(),
+                    "conversation_summary": new_summary,
+                }
+            # #endregion
+
+    # If response is still None after all attempts, return error
+    if response is None:
+        error_msg = "I apologize, but I was unable to generate a response. Please try again."
+        return {
+            "messages": [AIMessage(content=error_msg)],
+            "core_memory": core_memory.to_dict_with_history(),
+            "conversation_summary": new_summary,
+        }
 
     # Auto-compress blocks that are approaching their character limit
     needs_compression = core_memory.get_blocks_needing_compression()

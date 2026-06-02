@@ -4,6 +4,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Card, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
+import { LIBRARY_API_BASE } from "@/lib/api";
 import {
   Select,
   SelectContent,
@@ -13,7 +14,7 @@ import {
 } from "@/components/ui/select";
 import { ArrowLeft, Search, SlidersHorizontal, Loader2, ChevronDown, ChevronUp, SortAsc, SortDesc } from "lucide-react";
 
-const API_BASE = import.meta.env.DEV ? "http://localhost:8000" : "";
+const API_BASE = LIBRARY_API_BASE;
 
 interface SearchResult {
   id: string;

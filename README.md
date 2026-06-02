@@ -138,7 +138,7 @@ LANGCHAIN_PROJECT=knowledge-agent
 # Backend
 cd backend
 pip install -e .
-langgraph dev
+langgraph dev --no-reload
 
 # Frontend
 cd frontend

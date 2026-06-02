@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback, useRef } from "react";
 import { Client } from "@langchain/langgraph-sdk";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Badge } from "@/components/ui/badge";
+import { LANGGRAPH_API_URL } from "@/lib/api";
 import { Brain, ChevronRight, ChevronLeft, Loader2, Lock } from "lucide-react";
 
 interface CoreMemoryBlock {
@@ -18,7 +19,7 @@ interface CoreMemoryPanelProps {
   refreshKey?: number;
 }
 
-const API_URL = import.meta.env.VITE_LANGGRAPH_URL || "http://localhost:2024";
+const API_URL = LANGGRAPH_API_URL;
 
 const client = new Client({ apiUrl: API_URL });
 
