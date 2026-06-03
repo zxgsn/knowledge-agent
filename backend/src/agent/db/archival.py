@@ -84,7 +84,14 @@ def search_archival(
     try:
         from agent.storage.reranker import rerank
         results = rerank(query, results, top_k=int(limit), enabled=rerank_enabled)
-    except Exception:
+    except Exception as e:
+        # Catch ALL exceptions to ensure we never crash here
+        import traceback
+        from agent.logger import get_logger
+        logger = get_logger(__name__)
+        logger.error("Reranking failed in search_archival: %s", e, exc_info=True)
+        # Fallback: sort by original score and take top_k
+        results.sort(key=lambda x: x["score"], reverse=True)
         results = results[: int(limit)]
 
     # MMR deduplication

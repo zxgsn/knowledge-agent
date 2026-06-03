@@ -10,6 +10,7 @@ Downloaded to backend/models/bge-reranker-v2-m3/ (not HF cache).
 from __future__ import annotations
 
 import os
+import sys
 import threading
 from pathlib import Path
 
@@ -20,11 +21,14 @@ logger = get_logger(__name__)
 
 _model = None
 _model_lock = threading.Lock()
+# Track if we've already had a catastrophic failure and should disable reranking entirely
+_disabled_due_to_failure = False
 
 
 def _load_model():
     """Load the cross-encoder model (sync, for use with retry)."""
     from sentence_transformers import CrossEncoder
+    import torch
 
     model_name = os.getenv("RERANK_MODEL", "BAAI/bge-reranker-v2-m3")
 
@@ -37,16 +41,28 @@ def _load_model():
         model_path = model_name
         logger.info("Loading reranker model from HF: %s", model_path)
 
-    model = CrossEncoder(model_path, max_length=512, model_kwargs={"low_cpu_mem_usage": True})
+    # Force CPU and reduce memory usage to avoid segfault on Windows
+    device = "cpu"
+    if torch.cuda.is_available():
+        try:
+            # Test if CUDA actually works
+            torch.tensor([1.0]).cuda()
+            device = "cuda"
+        except Exception:
+            device = "cpu"
+            logger.debug("CUDA test failed, using CPU for reranking")
+    logger.info("Using device: %s for reranker", device)
+
+    model = CrossEncoder(model_path, max_length=512, device=device)
     logger.info("Reranker model loaded successfully")
     return model
 
 
 @with_retry(
-    max_retries=2,
-    base_delay=2.0,
-    max_delay=30.0,
-    retryable_exceptions=(OSError, RuntimeError, ConnectionError),
+    max_retries=1,
+    base_delay=1.0,
+    max_delay=5.0,
+    retryable_exceptions=(OSError, RuntimeError),
 )
 def _get_model():
     """Get or lazily load the cross-encoder model with retry on first load.
@@ -85,8 +101,14 @@ def rerank(
     Returns:
         Re-ranked results with 'score' replaced by cross-encoder score.
     """
+    global _disabled_due_to_failure
+
     if not results:
         return []
+
+    if _disabled_due_to_failure:
+        logger.debug("Reranking disabled due to previous failure")
+        return results[:top_k]
 
     if enabled is None:
         enabled = os.getenv("RERANK_ENABLED", "true").lower() not in ("false", "0", "no")
@@ -97,8 +119,8 @@ def rerank(
     try:
         model = _get_model()
     except Exception as exc:
-        logger.error("Failed to load reranker model after retries: %s", exc)
-        logger.warning("Falling back to original ranking (top %d)", top_k)
+        logger.error("Failed to load reranker model: %s — disabling reranking", exc)
+        _disabled_due_to_failure = True
         return results[:top_k]
 
     try:
@@ -107,7 +129,7 @@ def rerank(
         # on Windows with large models in threaded contexts
         import torch
         with torch.no_grad():
-            scores = model.predict(pairs, show_progress_bar=False)
+            scores = model.predict(pairs, show_progress_bar=False, convert_to_numpy=True)
 
         for r, s in zip(results, scores):
             r["score"] = float(s)
@@ -119,7 +141,11 @@ def rerank(
             results[0]["score"] if results else 0.0,
         )
     except Exception as exc:
-        logger.error("Reranking failed: %s — falling back to original order", exc)
+        logger.error("Reranking failed: %s — falling back to original order", exc, exc_info=True)
+        # If this is a serious error, consider disabling reranking entirely
+        if "segfault" in str(exc).lower() or "access violation" in str(exc).lower() or "fatal" in str(exc).lower():
+            _disabled_due_to_failure = True
+            logger.warning("Disabling reranking due to fatal error")
         return results[:top_k]
 
     return results[:top_k]
